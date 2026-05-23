@@ -31,8 +31,8 @@ function TerminalComponent({ params }: IDockviewPanelProps<{ convId: string }>) 
 }
 
 /** File viewer panel for markdown/code files */
-function FileViewerComponent({ params }: IDockviewPanelProps<{ filePath: string }>) {
-  return <FileViewer filePath={params.filePath} />;
+function FileViewerComponent({ params }: IDockviewPanelProps<{ filePath: string; baseCwd?: string }>) {
+  return <FileViewer filePath={params.filePath} baseCwd={params.baseCwd} />;
 }
 
 /** Web view panel for browsing URLs */

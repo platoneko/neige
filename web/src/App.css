@@ -1628,12 +1628,58 @@
 .file-viewer-path {
   flex: 1;
   min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 6px;
+  margin-left: -6px; /* visually align with old span position */
+  cursor: pointer;
+  text-align: left;
+  line-height: 1.4;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.file-viewer-path:hover {
+  color: var(--text-primary);
+  border-color: var(--border);
+  background: var(--bg-primary);
+}
+
+.file-viewer-path:focus-visible {
+  outline: none;
+  border-color: var(--text-muted);
+}
+
+.file-viewer-path[data-state='open'] {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+  background: var(--bg-primary);
+}
+
+.file-viewer-path.is-copied {
+  color: var(--blue);
+  border-color: var(--blue-dim);
+}
+
+.file-viewer-path-text {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.file-viewer-path-caret {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.6;
 }
 
 .file-viewer-lang {

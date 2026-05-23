@@ -8,7 +8,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { FilePicker } from './components/FilePicker';
 import { QuickLauncher } from './components/QuickLauncher';
 import { useConversations } from './hooks/useConversations';
-import { useConfig } from './hooks/useConfig';
+import { useConfig, type RecentFile } from './hooks/useConfig';
 import type { CreateConvRequest } from './types';
 import './App.css';
 
@@ -95,7 +95,7 @@ function App() {
   );
 
   const openFile = useCallback(
-    (filePath: string, fileName: string) => {
+    (filePath: string, fileName: string, baseCwd?: string) => {
       const api = dockviewApiRef.current;
       if (!api) return;
       // Use file path as panel ID (prefix to avoid collision with conv IDs)
@@ -109,12 +109,14 @@ function App() {
         id: panelId,
         title: fileName,
         component: 'fileViewer',
-        params: { filePath },
+        params: { filePath, baseCwd },
       });
-      // Save to recent files
+      // Save to recent files (preserve baseCwd so re-opens still get a relative path)
       const recent = config.recentFiles || [];
       const filtered = recent.filter((r) => r.path !== filePath);
-      updateConfig({ recentFiles: [{ path: filePath, name: fileName }, ...filtered].slice(0, 20) });
+      const entry: RecentFile = { path: filePath, name: fileName };
+      if (baseCwd) entry.baseCwd = baseCwd;
+      updateConfig({ recentFiles: [entry, ...filtered].slice(0, 20) });
     },
     [config.recentFiles, updateConfig],
   );

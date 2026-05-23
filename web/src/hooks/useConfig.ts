@@ -13,6 +13,9 @@ export interface RecentCommand {
 export interface RecentFile {
   path: string;
   name: string;
+  // Conversation cwd captured when this file was opened, used to derive a
+  // relative path in FileViewer. Optional for back-compat with old entries.
+  baseCwd?: string;
 }
 
 export interface Task {

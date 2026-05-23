@@ -10,12 +10,13 @@ interface DisplayItem {
   path: string;
   isRecent: boolean;
   fullPath: string;
+  baseCwd?: string;
 }
 
 interface FilePickerProps {
   open: boolean;
   onClose: () => void;
-  onOpenFile: (path: string, name: string) => void;
+  onOpenFile: (path: string, name: string, baseCwd?: string) => void;
   searchRoot: string;
   recentFiles: RecentFile[];
 }
@@ -77,13 +78,15 @@ export function FilePicker({ open, onClose, onOpenFile, searchRoot, recentFiles 
     filteredRecent.sort((a, b) => Number(isUnderRoot(b.path)) - Number(isUnderRoot(a.path)));
     for (const f of filteredRecent) {
       seenPaths.add(f.path);
-      items.push({ name: f.name, path: f.path, isRecent: true, fullPath: f.path });
+      // Fall back to current searchRoot for legacy recents that lack a saved baseCwd.
+      const baseCwd = f.baseCwd || (isUnderRoot(f.path) ? searchRoot : undefined);
+      items.push({ name: f.name, path: f.path, isRecent: true, fullPath: f.path, baseCwd });
     }
 
     for (const f of searchResults) {
       const fullPath = `${searchRoot}/${f.path}`;
       if (seenPaths.has(fullPath)) continue;
-      items.push({ name: f.name, path: f.path, isRecent: false, fullPath });
+      items.push({ name: f.name, path: f.path, isRecent: false, fullPath, baseCwd: searchRoot });
     }
 
     return items;
@@ -92,7 +95,7 @@ export function FilePicker({ open, onClose, onOpenFile, searchRoot, recentFiles 
   const displayList = buildDisplayList();
 
   const handleSelect = (item: DisplayItem) => {
-    onOpenFile(item.fullPath, item.name);
+    onOpenFile(item.fullPath, item.name, item.baseCwd);
     onClose();
   };
 
