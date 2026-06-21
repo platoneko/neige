@@ -89,8 +89,22 @@
       location.assign(dest);
       return true;
     }
-    if (r.status === 429) err.textContent = 'Too many attempts. Try again in a minute.';
-    else err.textContent = 'Invalid token.';
+    // Surface the real reason instead of always blaming the token. A 403 here
+    // means the origin/CSRF check rejected the request (the host in your URL is
+    // not in the server's allowed-origin list) — nothing to do with the token.
+    let detail = '';
+    try { detail = (await r.text()).trim(); } catch (_) {}
+    if (r.status === 429) {
+      err.textContent = 'Too many attempts. Try again in a minute.';
+    } else if (r.status === 401) {
+      err.textContent = 'Invalid token — check you pasted the full token from the server.';
+    } else if (r.status === 403) {
+      err.textContent = 'Request blocked (403): ' + (detail || 'origin not allowed')
+        + '. The host in your address bar is not in the server’s allowed-origin list — '
+        + 'start neige with --allowed-origin ' + window.location.origin + '.';
+    } else {
+      err.textContent = 'Sign-in failed (HTTP ' + r.status + ')' + (detail ? ': ' + detail : '') + '.';
+    }
     return false;
   }
 
