@@ -109,6 +109,12 @@ struct Cli {
     #[arg(long = "allowed-origin")]
     allowed_origins: Vec<String>,
 
+    /// Trust any http(s) origin whose host IP is in this CIDR block (e.g.
+    /// 10.8.0.0/24 for a WireGuard subnet), so the whole subnet passes the
+    /// origin check without listing each host. Can be repeated.
+    #[arg(long = "allowed-cidr")]
+    allowed_cidrs: Vec<String>,
+
     /// Disable authentication entirely (DEV ONLY — forces --listen 127.0.0.1)
     #[arg(long)]
     no_auth: bool,
@@ -378,6 +384,7 @@ async fn main() {
             rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             token_hash: None,
             allowed_origins: allowed_origins.clone(),
+            allowed_cidrs: cli.allowed_cidrs.clone(),
             internal_token: internal_token.clone(),
         }
     } else {
@@ -418,6 +425,7 @@ async fn main() {
             rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             token_hash: Some(hash),
             allowed_origins,
+            allowed_cidrs: cli.allowed_cidrs.clone(),
             internal_token: internal_token.clone(),
         }
     };

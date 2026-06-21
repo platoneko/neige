@@ -10,7 +10,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use uuid::Uuid;
 
-use crate::auth::origin::{is_allowed_origin, origin_from_referer};
+use crate::auth::origin::{is_allowed_origin_with_cidrs, origin_from_referer};
 use crate::auth::store::{LoginRateLimiter, SessionStore};
 use crate::auth::token::verify_token;
 
@@ -35,6 +35,9 @@ pub struct AuthConfig {
     /// Hashed token; `None` means auth disabled (`--no-auth`).
     pub token_hash: Option<String>,
     pub allowed_origins: Vec<String>,
+    /// CIDR blocks whose IP-literal origins are trusted (e.g. a WireGuard
+    /// subnet `10.8.0.0/24`), so the whole subnet passes the origin check.
+    pub allowed_cidrs: Vec<String>,
     /// Random plaintext token generated at server startup, in-memory only.
     /// Used for chat-session MCP injection: we write this token into the
     /// auto-generated `--mcp-config` file so the inner claude can call
@@ -224,7 +227,7 @@ pub async fn origin_check_middleware(
         .and_then(|v| v.to_str().ok());
 
     if let Some(o) = origin {
-        if is_allowed_origin(o, &cfg.allowed_origins) {
+        if is_allowed_origin_with_cidrs(o, &cfg.allowed_origins, &cfg.allowed_cidrs) {
             return next.run(req).await;
         }
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
@@ -238,7 +241,7 @@ pub async fn origin_check_middleware(
     // State-changing HTTP without Origin: fall back to Referer
     if let Some(r) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
         if let Some(o) = origin_from_referer(r) {
-            if is_allowed_origin(&o, &cfg.allowed_origins) {
+            if is_allowed_origin_with_cidrs(&o, &cfg.allowed_origins, &cfg.allowed_cidrs) {
                 return next.run(req).await;
             }
         }
