@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { marked } from 'marked';
 import { DropdownMenu } from '@radix-ui/themes';
 import { authedFetch, fileUrl as buildFileUrl } from '../api';
+import { writeClipboard } from '../clipboard';
 
 interface FileViewerProps {
   filePath: string;
@@ -59,24 +60,6 @@ function PathMenu({ filePath, relPath, copied, onCopy }: PathMenuProps) {
       </DropdownMenu.Content>
     </DropdownMenu.Root>
   );
-}
-
-async function writeClipboard(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand('copy'); } catch { /* ignore */ }
-    document.body.removeChild(ta);
-    return ok;
-  }
 }
 
 const IMAGE_EXTS = new Set([
