@@ -94,7 +94,7 @@ pub(super) async fn browse_dir(
         let meta = entry.metadata();
         let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
+        if name == ".git" {
             continue;
         }
         entries.push(DirEntryInfo { name, is_dir });
@@ -264,8 +264,10 @@ pub(super) async fn search_files(
                 return;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            // Skip hidden dirs and common large dirs
-            if name.starts_with('.')
+            // Skip .git and common large dirs. Other dotdirs (.claude, .github,
+            // .vscode, .cargo, …) are useful to navigate into, so don't blanket-
+            // exclude `.`-prefixed names.
+            if name == ".git"
                 || name == "node_modules"
                 || name == "target"
                 || name == "__pycache__"
