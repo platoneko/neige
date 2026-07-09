@@ -1,8 +1,47 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { marked } from 'marked';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Marked } from 'marked';
 import { DropdownMenu } from '@radix-ui/themes';
 import { authedFetch, fileUrl as buildFileUrl } from '../api';
 import { writeClipboard } from '../clipboard';
+import {
+  MarkdownToc,
+  stripInlineMarkdown,
+  tocHeadingId,
+  type TocHeading,
+  type TocLevel,
+} from './MarkdownToc';
+
+// Render markdown with h1–h4 headings tagged `id="md-h-N"` in document order,
+// and collect a parallel `headings` list the TOC can render off of. Deriving
+// both from a single marked pass keeps the DOM ids and the TOC entries aligned
+// on edge cases where a standalone regex extractor would drift (headings
+// inside blockquotes, unusual inline formatting, etc.).
+function renderMarkdownWithToc(source: string): {
+  html: string;
+  headings: TocHeading[];
+} {
+  const headings: TocHeading[] = [];
+  const m = new Marked({
+    renderer: {
+      heading(token) {
+        const inner = this.parser.parseInline(token.tokens) as string;
+        if (token.depth >= 1 && token.depth <= 4) {
+          const id = tocHeadingId(headings.length);
+          const text = stripInlineMarkdown(token.text) || token.text.trim();
+          headings.push({
+            level: token.depth as TocLevel,
+            text,
+            id,
+          });
+          return `<h${token.depth} id="${id}">${inner}</h${token.depth}>\n`;
+        }
+        return `<h${token.depth}>${inner}</h${token.depth}>\n`;
+      },
+    },
+  });
+  const html = m.parse(source) as string;
+  return { html, headings };
+}
 
 interface FileViewerProps {
   filePath: string;
@@ -94,6 +133,21 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
   // ETag of the file state the preview currently reflects. Drives the image
   // cache-bust query param and the HEAD-diff check on tab revisit.
   const [etag, setEtag] = useState<string | null>(null);
+  // TOC sidebar state — deliberately not persisted; it's a "reading-this-file"
+  // affordance, not a global preference.
+  const [tocCollapsed, setTocCollapsed] = useState(false);
+  const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
+  const paneContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const isMarkdown = language === 'markdown';
+
+  const { html: markdownHtml, headings } = useMemo(
+    () =>
+      isMarkdown
+        ? renderMarkdownWithToc(content)
+        : { html: '', headings: [] as TocHeading[] },
+    [isMarkdown, content],
+  );
 
   const loadText = useCallback(async () => {
     setLoading(true);
@@ -175,6 +229,58 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     }
   }, [filePath, relPath]);
 
+  useEffect(() => {
+    if (!isMarkdown || headings.length === 0) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+    const container = paneContainerRef.current;
+    if (!container) return;
+    // Use the nearest scrollable ancestor as the observer root so `rootMargin`
+    // is measured against the actual viewport of the preview.
+    const scroller = container.closest('.file-viewer-content');
+    const nodes = Array.from(
+      container.querySelectorAll<HTMLElement>('[id^="md-h-"]'),
+    );
+    if (nodes.length === 0) return;
+    const visible = new Set<string>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const id = (e.target as HTMLElement).id;
+          if (e.isIntersecting) visible.add(id);
+          else visible.delete(id);
+        }
+        if (visible.size === 0) {
+          setActiveHeadingId(null);
+          return;
+        }
+        // Pick the DOM-first among visible so the highlight is stable when
+        // more than one heading sits inside the activation band.
+        const first = nodes.find((n) => visible.has(n.id));
+        setActiveHeadingId(first?.id ?? null);
+      },
+      {
+        root: scroller instanceof HTMLElement ? scroller : null,
+        rootMargin: '0px 0px -70% 0px',
+        threshold: 0,
+      },
+    );
+    nodes.forEach((n) => observer.observe(n));
+    return () => observer.disconnect();
+  }, [isMarkdown, headings, markdownHtml]);
+
+  const handleTocSelect = useCallback((h: TocHeading) => {
+    const container = paneContainerRef.current;
+    if (!container) return;
+    // Scope the id lookup to this pane so multiple FileViewers on screen
+    // wouldn't race for the same `md-h-N`.
+    const target = container.querySelector<HTMLElement>(`[id="${h.id}"]`);
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
+  const handleToggleToc = useCallback(() => {
+    setTocCollapsed((c) => !c);
+  }, []);
+
   if (isImage) {
     const cacheKey = normalizeEtag(etag);
     return (
@@ -223,8 +329,6 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     );
   }
 
-  const isMarkdown = language === 'markdown';
-
   return (
     <div className="file-viewer">
       <div className="file-viewer-header">
@@ -248,10 +352,22 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
       </div>
       <div className="file-viewer-content">
         {isMarkdown ? (
-          <div
-            className="file-viewer-markdown"
-            dangerouslySetInnerHTML={{ __html: marked.parse(content) as string }}
-          />
+          <div className="file-viewer-markdown-wrap">
+            <div
+              className="file-viewer-markdown"
+              ref={paneContainerRef}
+              dangerouslySetInnerHTML={{ __html: markdownHtml }}
+            />
+            {headings.length > 0 && (
+              <MarkdownToc
+                headings={headings}
+                activeId={activeHeadingId}
+                collapsed={tocCollapsed}
+                onToggleCollapsed={handleToggleToc}
+                onSelect={handleTocSelect}
+              />
+            )}
+          </div>
         ) : (
           <pre className="file-viewer-code">
             <code>{content}</code>

@@ -1885,6 +1885,132 @@
   margin: 1.5em 0;
 }
 
+/* Markdown TOC sidebar */
+.file-viewer-markdown-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.file-viewer-markdown-wrap > .file-viewer-markdown {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.file-viewer-md-toc {
+  flex: 0 0 220px;
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-muted);
+  border-left: 1px solid var(--border);
+  padding-left: 12px;
+}
+
+.file-viewer-md-toc.collapsed {
+  flex: 0 0 32px;
+  padding-left: 0;
+  border-left: none;
+}
+
+.file-viewer-md-toc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+
+.file-viewer-md-toc.collapsed .file-viewer-md-toc-head {
+  justify-content: center;
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 0;
+}
+
+.file-viewer-md-toc-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 11px;
+}
+
+.file-viewer-md-toc-toggle {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  width: 22px;
+  height: 22px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.file-viewer-md-toc-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.file-viewer-md-toc-list {
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.file-viewer-md-toc-entry {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  font: inherit;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.1s, background 0.1s;
+}
+
+.file-viewer-md-toc-entry[data-level="1"] { padding-left: 6px; }
+.file-viewer-md-toc-entry[data-level="2"] { padding-left: 18px; }
+.file-viewer-md-toc-entry[data-level="3"] { padding-left: 30px; font-size: 11px; }
+.file-viewer-md-toc-entry[data-level="4"] { padding-left: 42px; font-size: 11px; }
+
+.file-viewer-md-toc-entry:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.file-viewer-md-toc-entry.active {
+  color: var(--text-primary);
+  background: var(--bg-active);
+  font-weight: 600;
+}
+
+.file-viewer-md-toc-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 6px;
+}
+
 /* ===== Recent Commands ===== */
 .recent-commands {
   margin-bottom: 16px;
