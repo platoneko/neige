@@ -1,5 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- co-locate the pure
    extractHeadings + tocHeadingId utilities with the component that uses them */
+import * as Tooltip from '@radix-ui/react-tooltip';
+
 export type TocLevel = 1 | 2 | 3 | 4;
 
 export interface TocHeading {
@@ -12,9 +14,15 @@ const HEADING_RE = /^ {0,3}(#{1,4})\s+(.+?)\s*#*\s*$/;
 const FENCE_RE = /^( {0,3})(`{3,}|~{3,})/;
 const SETEXT_RE = /^ {0,3}(=+|-+)\s*$/;
 const ID_PREFIX = 'md-h-';
+const TOC_MAX_LEN = 20;
 
 export function tocHeadingId(index: number): string {
   return `${ID_PREFIX}${index}`;
+}
+
+export function truncateTocText(text: string): string {
+  if (text.length <= TOC_MAX_LEN) return text;
+  return text.slice(0, TOC_MAX_LEN - 3) + '...';
 }
 
 export function stripInlineMarkdown(input: string): string {
@@ -132,20 +140,43 @@ export function MarkdownToc({
           {headings.length === 0 ? (
             <div className="file-viewer-md-toc-empty">No headings</div>
           ) : (
-            headings.map((h) => (
-              <button
-                key={h.id}
-                type="button"
-                data-level={h.level}
-                className={`file-viewer-md-toc-entry${
-                  activeId === h.id ? ' active' : ''
-                }`}
-                onClick={() => onSelect(h)}
-                title={h.text}
-              >
-                {h.text}
-              </button>
-            ))
+            <Tooltip.Provider delayDuration={150} skipDelayDuration={80}>
+              {headings.map((h) => {
+                const shown = truncateTocText(h.text);
+                const truncated = shown !== h.text;
+                const btn = (
+                  <button
+                    key={h.id}
+                    type="button"
+                    data-level={h.level}
+                    className={`file-viewer-md-toc-entry${
+                      activeId === h.id ? ' active' : ''
+                    }`}
+                    onClick={() => onSelect(h)}
+                  >
+                    {shown}
+                  </button>
+                );
+                if (!truncated) return btn;
+                return (
+                  <Tooltip.Root key={h.id}>
+                    <Tooltip.Trigger asChild>{btn}</Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content
+                        side="left"
+                        align="center"
+                        sideOffset={6}
+                        collisionPadding={8}
+                        className="file-viewer-md-toc-tip"
+                      >
+                        {h.text}
+                        <Tooltip.Arrow className="file-viewer-md-toc-tip-arrow" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                );
+              })}
+            </Tooltip.Provider>
           )}
         </div>
       )}

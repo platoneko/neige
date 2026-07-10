@@ -1989,6 +1989,25 @@
   transition: color 0.1s, background 0.1s;
 }
 
+.file-viewer-md-toc-tip {
+  z-index: 1000;
+  padding: 6px 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
+  max-width: 320px;
+  user-select: none;
+}
+
+.file-viewer-md-toc-tip-arrow {
+  fill: var(--bg-secondary);
+}
+
 .file-viewer-md-toc-entry[data-level="1"] { padding-left: 6px; }
 .file-viewer-md-toc-entry[data-level="2"] { padding-left: 18px; }
 .file-viewer-md-toc-entry[data-level="3"] { padding-left: 30px; font-size: 11px; }

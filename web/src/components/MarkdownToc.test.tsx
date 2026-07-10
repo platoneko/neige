@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractHeadings, tocHeadingId } from './MarkdownToc';
+import { extractHeadings, tocHeadingId, truncateTocText } from './MarkdownToc';
 
 describe('extractHeadings', () => {
   it('returns [] for empty input', () => {
@@ -121,5 +121,28 @@ describe('extractHeadings', () => {
   it('handles CRLF line endings', () => {
     const src = '# One\r\n## Two\r\n';
     expect(extractHeadings(src).map((h) => h.text)).toEqual(['One', 'Two']);
+  });
+});
+
+describe('truncateTocText', () => {
+  it('leaves ≤20-char text unchanged', () => {
+    expect(truncateTocText('short')).toBe('short');
+    expect(truncateTocText('exactly twenty chars')).toBe('exactly twenty chars');
+    expect(truncateTocText('exactly twenty chars'.slice(0, 20))).toHaveLength(20);
+  });
+
+  it('truncates >20-char text to 17 chars + "..."', () => {
+    const long = 'this heading is way too long to fit';
+    const out = truncateTocText(long);
+    expect(out).toBe('this heading is w...');
+    expect(out).toHaveLength(20);
+  });
+
+  it('counts CJK characters as one each', () => {
+    expect(truncateTocText('中文标题不太长')).toBe('中文标题不太长');
+    const longCn = '这是一个非常非常长的中文标题需要被截断显示';
+    const out = truncateTocText(longCn);
+    expect(out).toBe('这是一个非常非常长的中文标题需要被...');
+    expect(out).toHaveLength(20);
   });
 });
