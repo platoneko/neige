@@ -126,6 +126,16 @@ struct Cli {
     /// `--program`).
     #[arg(last = true)]
     cmd: Vec<String>,
+
+    /// Tie the daemon's lifetime to its parent (neige-server) via
+    /// `prctl(PR_SET_PDEATHSIG, SIGTERM)`. When the parent exits — clean
+    /// shutdown or crash — the kernel signals the daemon, avoiding the
+    /// orphan-daemon pileup that happens in the default "outlive the
+    /// server" mode. Opt-in so prod deploys that want daemons to survive
+    /// `systemctl restart` (see the `KillMode=process` note in
+    /// `neige-server`'s attach/daemon.rs) don't get this behaviour.
+    #[arg(long, default_value_t = false)]
+    tie_to_parent: bool,
 }
 
 /// Events fanned out to every attached client in terminal mode.
@@ -237,8 +247,23 @@ async fn main() -> anyhow::Result<()> {
         cmd = ?cli.cmd,
         runner_path = ?cli.runner_path,
         resume = cli.resume,
+        tie_to_parent = cli.tie_to_parent,
         "starting daemon"
     );
+
+    // Why: opt-in coupling to the server's lifetime. Nothing in this binary
+    // detaches from the parent (no setsid / no double-fork / no daemonize),
+    // so the daemon's parent at this point is still neige-server, meaning
+    // PR_SET_PDEATHSIG will actually fire on server death rather than
+    // silently no-op'ing because the parent already became init.
+    #[cfg(target_os = "linux")]
+    if cli.tie_to_parent {
+        use nix::sys::prctl;
+        use nix::sys::signal::Signal;
+        if let Err(e) = prctl::set_pdeathsig(Signal::SIGTERM) {
+            tracing::warn!(error = %e, "prctl(PR_SET_PDEATHSIG, SIGTERM) failed");
+        }
+    }
 
     match cli.mode {
         Mode::Terminal => {
@@ -319,9 +344,17 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
         killer.clone(),
     ));
 
-    // Block until the child exits.
-    let _ = shutdown_rx.await;
-    tracing::info!("child exited, shutting down");
+    // Why: race child-exit against SIGTERM/SIGINT so a signal-terminated
+    // daemon still runs the sock-unlink path below. Matters in
+    // NEIGE_TIE_TO_PARENT=1 mode where the kernel sends SIGTERM on parent
+    // death — without this handler the sock file would linger until cron
+    // reaped it.
+    tokio::select! {
+        _ = shutdown_rx => tracing::info!("child exited, shutting down"),
+        _ = wait_termination_signal() => {
+            tracing::info!("received termination signal, shutting down");
+        }
+    }
 
     // Let in-flight clients flush the ChildExited frame before we close.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -436,13 +469,46 @@ async fn run_chat(cli: Cli) -> anyhow::Result<()> {
         stdin_tx.clone(),
     ));
 
-    let _ = shutdown_rx.await;
-    tracing::info!("chat runner exited, shutting down");
+    // Why: same signal-vs-child-exit race as in run_terminal — SIGTERM must
+    // reach the sock-unlink path so tie-to-parent kills don't leak sock files.
+    tokio::select! {
+        _ = shutdown_rx => tracing::info!("chat runner exited, shutting down"),
+        _ = wait_termination_signal() => {
+            tracing::info!("received termination signal, shutting down (chat mode)");
+        }
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     accept_task.abort();
 
     let _ = std::fs::remove_file(&cli.sock);
     Ok(())
+}
+
+/// Resolves on the first SIGTERM or SIGINT delivered to the process. Used by
+/// both modes to trigger the sock-unlink cleanup path instead of letting the
+/// default signal disposition terminate us abruptly.
+async fn wait_termination_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "install SIGTERM handler failed");
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    let mut int = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "install SIGINT handler failed");
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => tracing::info!("received SIGTERM"),
+        _ = int.recv() => tracing::info!("received SIGINT"),
+    }
 }
 
 fn bind_socket(path: &Path) -> anyhow::Result<UnixListener> {

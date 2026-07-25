@@ -55,6 +55,20 @@ fn daemon_binary_path() -> PathBuf {
     PathBuf::from("neige-session-daemon")
 }
 
+/// Read the `NEIGE_TIE_TO_PARENT` env var. Truthy values `1` / `true` /
+/// `yes` (case-insensitive) enable the daemon's `--tie-to-parent` flag,
+/// which installs `PR_SET_PDEATHSIG(SIGTERM)` so daemons die with the
+/// server instead of accumulating as orphans across restarts.
+fn tie_to_parent_enabled() -> bool {
+    matches!(
+        std::env::var("NEIGE_TIE_TO_PARENT")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
 /// Ensure a daemon is running for `id`. Idempotent: if one is already live,
 /// `program` / `cwd` / `env` are ignored and the caller just reattaches.
 /// Returns `Ok(true)` when a fresh daemon was spawned.
@@ -129,6 +143,12 @@ async fn spawn_daemon(
     let mut cmd = Command::new(&daemon_bin);
     cmd.args(["--id", &id.to_string()]);
     cmd.args(["--sock", &sock.to_string_lossy()]);
+    // Opt-in: tie daemon lifetime to neige-server via PR_SET_PDEATHSIG on
+    // the daemon side. Dev-mode knob so restarts don't leak orphan daemons;
+    // prod keeps the default "survive systemctl restart" behaviour.
+    if tie_to_parent_enabled() {
+        cmd.arg("--tie-to-parent");
+    }
     cmd.args(tail);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
