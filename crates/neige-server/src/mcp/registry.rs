@@ -149,6 +149,7 @@ mod tests {
             rate_limiter: Arc::new(LoginRateLimiter::new()),
             token_hash: None,
             allowed_origins: Vec::new(),
+            allowed_cidrs: Vec::new(),
             internal_token: Arc::new("test".to_string()),
         };
         let state = AppState {
