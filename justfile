@@ -23,6 +23,15 @@ run *args:
         --allowed-cidr 100.64.0.0/10 \
         {{args}}
 
+# Detach via nohup + </dev/null so closing this shell doesn't SIGHUP the
+# server. Uses `just run` internally to share the env-stripping + tie-to-
+# parent logic; the extra `just` layer costs one small process.
+[doc('Same as run but backgrounded, appending to _local/tmp/neige-server.log')]
+run-bg *args:
+    @mkdir -p _local/tmp
+    @nohup just run {{args}} >>_local/tmp/neige-server.log 2>&1 </dev/null &
+    @sleep 0.3 && echo "neige-server backgrounded — tail -f _local/tmp/neige-server.log"
+
 [doc('Report neige-session-daemon health (healthy/orphan/broken + orphan socks)')]
 diagnose:
     @bash scripts/diagnose-daemons.sh
