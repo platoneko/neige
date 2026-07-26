@@ -1,41 +1,33 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MessageSquare, Terminal as TerminalIcon } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
 import { Button } from '@neige/shared';
 import type { ConvInfo } from '../types';
+import type { OpenFile, TaskGroup } from '../tasks';
 import { PortForwardPanel } from './PortForwardPanel';
 import type { PortForward } from './PortForwardPanel';
-import { TaskPanel } from './TaskPanel';
-import type { Task } from './TaskPanel';
+import { TaskTree } from './TaskTree';
 import { useBusyTerminalIds } from '../hooks/terminalBusy';
 
 export type { PortForward };
 
-function timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
 interface SidebarProps {
   className?: string;
   conversations: ConvInfo[];
+  /** Same conversations, grouped into tasks for the expanded tree. The flat
+   *  list is still needed for the collapsed rail, which has no hierarchy. */
+  tasks: TaskGroup[];
+  onNewAgent: (root: ConvInfo) => void;
   connected: boolean;
   openTabs: string[];
   activeTab: string | null;
+  openFiles: OpenFile[];
+  onSelectFile: (panelId: string) => void;
+  onCloseFile: (panelId: string) => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onNew: () => void;
   portForwards: PortForward[];
   onPortForwardUpdate: (ports: PortForward[]) => void;
-  tasks: Task[];
-  onTasksUpdate: (tasks: Task[]) => void;
 }
 
 const COLLAPSED_WIDTH = 48;
@@ -44,81 +36,23 @@ const SNAP_THRESHOLD = 120;
 const DEFAULT_WIDTH = 280;
 const MAX_WIDTH = 480;
 
-function InlineTitle({
-  value,
-  onSave,
-}: {
-  value: string;
-  onSave: (newTitle: string) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (editing) {
-      setDraft(value);
-      setTimeout(() => {
-        inputRef.current?.focus();
-        inputRef.current?.select();
-      }, 0);
-    }
-  }, [editing, value]);
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    if (trimmed && trimmed !== value) {
-      onSave(trimmed);
-    }
-    setEditing(false);
-  };
-
-  if (editing) {
-    return (
-      <input
-        ref={inputRef}
-        className="conv-title-input"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') commit();
-          if (e.key === 'Escape') setEditing(false);
-          e.stopPropagation();
-        }}
-        onClick={(e) => e.stopPropagation()}
-      />
-    );
-  }
-
-  return (
-    <span
-      className="conv-title"
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        setEditing(true);
-      }}
-      title="Double-click to rename"
-    >
-      {value}
-    </span>
-  );
-}
-
 export function Sidebar({
   className = '',
   conversations,
+  tasks,
+  onNewAgent,
   connected,
   openTabs,
   activeTab,
+  openFiles,
+  onSelectFile,
+  onCloseFile,
   onSelect,
   onDelete,
   onRename,
   onNew,
   portForwards,
   onPortForwardUpdate,
-  tasks,
-  onTasksUpdate,
 }: SidebarProps) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_WIDTH);
   const [collapsed, setCollapsed] = useState(false);
@@ -174,64 +108,6 @@ export function Sidebar({
     document.addEventListener('mouseup', onMouseUp);
   }, [sidebarWidth, collapsed]);
 
-  const grouped = useMemo(() => {
-    const running = conversations.filter((c) => c.status === 'running');
-    const detached = conversations.filter((c) => c.status === 'detached');
-    const dead = conversations.filter((c) => c.status === 'dead');
-    return { running, detached, dead };
-  }, [conversations]);
-
-  const renderItem = (c: ConvInfo) => (
-    <div
-      key={c.id}
-      className={`conv-item ${activeTab === c.id ? 'active' : ''} ${openTabs.includes(c.id) ? 'open' : ''} ${busyIds.has(c.id) ? 'busy' : ''}`}
-      onClick={() => onSelect(c.id)}
-    >
-      <div className="conv-status-dot-wrapper">
-        <span className={`conv-status-dot ${c.status}`} />
-      </div>
-      <span
-        className={`conv-mode-icon ${c.mode}`}
-        title={c.mode === 'chat' ? 'Chat (stream-json)' : 'Terminal (PTY)'}
-        aria-label={c.mode}
-      >
-        {c.mode === 'chat' ? (
-          <MessageSquare size={12} strokeWidth={2} />
-        ) : (
-          <TerminalIcon size={12} strokeWidth={2} />
-        )}
-      </span>
-      <div className="conv-info">
-        <InlineTitle
-          value={c.title}
-          onSave={(newTitle) => onRename(c.id, newTitle)}
-        />
-        <span className="conv-meta">
-          <span className="conv-path">{c.cwd}</span>
-          {c.worktree_branch && (
-            <span className="conv-branch" title={c.worktree_branch}>
-              &#9741; {c.worktree_branch.replace('neige/', '')}
-            </span>
-          )}
-          <span className="conv-time">{timeAgo(c.created_at)}</span>
-        </span>
-      </div>
-      <div className="conv-actions">
-        <button
-          className="btn-delete"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(c.id);
-          }}
-          title="Delete"
-          aria-label="Delete conversation"
-        >
-          ×
-        </button>
-      </div>
-    </div>
-  );
-
   return (
     <aside
       className={`sidebar ${className} ${collapsed ? 'sidebar-collapsed' : ''}`}
@@ -262,8 +138,8 @@ export function Sidebar({
             <button
               className="sidebar-collapsed-btn"
               onClick={onNew}
-              title="New conversation"
-              aria-label="New conversation"
+              title="New task"
+              aria-label="New task"
             >
               +
             </button>
@@ -294,7 +170,7 @@ export function Sidebar({
             </div>
             <div className="sidebar-header-actions">
               <Button variant="primary" size="sm" className="btn-new" onClick={onNew}>
-                <span className="btn-new-icon">+</span> New
+                <span className="btn-new-icon">+</span> New Task
               </Button>
               <button
                 className="sidebar-collapse-btn"
@@ -306,8 +182,8 @@ export function Sidebar({
               </button>
             </div>
           </div>
-          <div className="conv-list">
-            {conversations.length === 0 ? (
+          {tasks.length === 0 ? (
+            <div className="conv-list">
               <div className="empty-list">
                 <svg className="empty-list-icon" viewBox="0 0 48 48" fill="none" width="48" height="48">
                   <rect x="6" y="10" width="36" height="28" rx="4" stroke="currentColor" strokeWidth="2" opacity="0.3" />
@@ -315,49 +191,27 @@ export function Sidebar({
                   <circle cx="12" cy="22" r="1.5" fill="currentColor" opacity="0.3" />
                   <circle cx="12" cy="28" r="1.5" fill="currentColor" opacity="0.3" />
                 </svg>
-                <p>No conversations yet</p>
+                <p>No tasks yet</p>
                 <button className="btn-empty-new" onClick={onNew}>
-                  Create your first conversation
+                  Create your first task
                 </button>
               </div>
-            ) : (
-              <>
-                {grouped.running.length > 0 && (
-                  <div className="conv-group">
-                    <div className="conv-group-label">
-                      <span className="conv-group-dot running" />
-                      Running ({grouped.running.length})
-                    </div>
-                    {grouped.running.map(renderItem)}
-                  </div>
-                )}
-                {grouped.detached.length > 0 && (
-                  <div className="conv-group">
-                    <div className="conv-group-label">
-                      <span className="conv-group-dot detached" />
-                      Detached ({grouped.detached.length})
-                    </div>
-                    {grouped.detached.map(renderItem)}
-                  </div>
-                )}
-                {grouped.dead.length > 0 && (
-                  <div className="conv-group">
-                    <div className="conv-group-label">
-                      <span className="conv-group-dot dead" />
-                      Stopped ({grouped.dead.length})
-                    </div>
-                    {grouped.dead.map(renderItem)}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          <TaskPanel
-            tasks={tasks}
-            conversations={conversations}
-            onUpdate={onTasksUpdate}
-            onJump={onSelect}
-          />
+            </div>
+          ) : (
+            <TaskTree
+              tasks={tasks}
+              openTabs={openTabs}
+              activeTab={activeTab}
+              openFiles={openFiles}
+              onSelectFile={onSelectFile}
+              onCloseFile={onCloseFile}
+              busyIds={busyIds}
+              onSelect={onSelect}
+              onDelete={onDelete}
+              onRename={onRename}
+              onNewAgent={onNewAgent}
+            />
+          )}
           <PortForwardPanel
             ports={portForwards}
             onUpdate={onPortForwardUpdate}

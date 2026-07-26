@@ -24,7 +24,8 @@ pub fn tool() -> Tool {
     Tool::new(
         "delete_session",
         "Permanently delete a chat session by `name`: kills its daemon (and \
-         the claude subprocess) and removes its metadata file. Irreversible. \
+         the claude subprocess) and removes its metadata file. Any agents \
+         nested under this session are deleted along with it. Irreversible. \
          Use `stop` instead to just interrupt a turn.",
         Scope::Global,
         handle,

@@ -30,6 +30,12 @@ interface ConvInfoBase {
   created_at: string;
   use_worktree: boolean;
   worktree_branch: string | null;
+  /**
+   * The task this agent belongs to. `null` = this agent IS a task; its
+   * title is the task name and its cwd the task directory. Nesting is
+   * exactly one level deep.
+   */
+  parent_id: string | null;
 }
 
 export type ConvInfo = ConvInfoBase & SessionMode;
@@ -41,6 +47,8 @@ interface CreateConvRequestBase {
   proxy?: string;
   use_worktree: boolean;
   worktree_name?: string;
+  /** Create this agent inside an existing task. Omit for a new task. */
+  parent_id?: string;
 }
 
 /**

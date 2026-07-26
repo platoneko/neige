@@ -5,17 +5,26 @@ import type { ConvInfo } from '../types'
 
 interface Props {
   conv: ConvInfo
+  /** Whole list, only so the delete confirmation can count this card's
+   *  child agents. The overview renders a flat list with no hierarchy
+   *  cues, so nothing else on screen hints that a card is a task root. */
+  conversations: ConvInfo[]
   onRename: (title: string) => Promise<void>
   onDelete: () => Promise<void>
   onClose: () => void
 }
 
-export function CardMenu({ conv, onRename, onDelete, onClose }: Props) {
+export function CardMenu({ conv, conversations, onRename, onDelete, onClose }: Props) {
   const [mode, setMode] = useState<'menu' | 'rename' | 'confirmDelete'>('menu')
   const [newTitle, setNewTitle] = useState(conv.title)
   const [err, setErr] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
   const [copied, setCopied] = useState(false)
+
+  // The server cascades a root's delete to its children, so this card can
+  // take sessions with it that the user never selected — and a flat list
+  // gives them no way to see that coming. Say the count out loud instead.
+  const childCount = conversations.filter((c) => c.parent_id === conv.id).length
 
   const doRename = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -134,9 +143,19 @@ export function CardMenu({ conv, onRename, onDelete, onClose }: Props) {
             <Flex direction="column" gap="3">
               <Callout.Root color="red" size="2">
                 <Callout.Text>
-                  确认删除 <strong>{conv.title}</strong>？
-                  <br />
-                  该 session 的 PTY 会被杀掉，所有客户端（桌面 + 其他手机）都会断开。
+                  {childCount > 0 ? (
+                    <>
+                      确认删除任务 <strong>{conv.title}</strong> 及其 {childCount} 个 agent？
+                      <br />
+                      这些 session 的 PTY 都会被杀掉，所有客户端（桌面 + 其他手机）都会断开。
+                    </>
+                  ) : (
+                    <>
+                      确认删除 <strong>{conv.title}</strong>？
+                      <br />
+                      该 session 的 PTY 会被杀掉，所有客户端（桌面 + 其他手机）都会断开。
+                    </>
+                  )}
                 </Callout.Text>
               </Callout.Root>
               {err && (

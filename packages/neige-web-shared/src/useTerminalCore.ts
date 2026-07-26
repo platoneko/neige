@@ -126,6 +126,25 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     fitRef.current = fit;
     onTerminalReadyRef.current?.(term);
 
+    // xterm.js drops OSC 52 by default, which silently breaks copy from
+    // nvim/tmux inside the embedded terminal. Decode the base64 payload and
+    // forward it to the system clipboard. navigator.clipboard needs a secure
+    // context (https or localhost); on plain http it's undefined and the
+    // write is a no-op, which matches xterm.js's prior behavior.
+    const osc52Disposable = term.parser.registerOscHandler(52, (data) => {
+      const semi = data.indexOf(';');
+      if (semi < 0) return true;
+      const payload = data.slice(semi + 1);
+      // "?" is a read-back query; empty clears the selection. Neither writes.
+      if (!payload || payload === '?') return true;
+      try {
+        const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
+        const text = new TextDecoder().decode(bytes);
+        navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
+      } catch { /* malformed base64 */ }
+      return true;
+    });
+
     // --- Resize pipeline ---
     // Single debounced chain: container change → fit xterm → send PTY resize.
     // 150ms debounce keeps SIGWINCH from flooding the PTY during drag resizes.
@@ -365,6 +384,7 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
       dataDisposable.dispose();
+      osc52Disposable.dispose();
       wsRef.current?.close(1000);
       term.dispose();
       termRef.current = null;
