@@ -15,7 +15,7 @@ import {
  * sidebar reflects the change immediately without waiting for the next poll.
  */
 export function useConversations() {
-  const { conversations, connected, refresh } = useConversationsPoll({
+  const { conversations, connected, loadedOnce, refresh } = useConversationsPoll({
     intervalMs: 3000,
   });
 
@@ -53,5 +53,5 @@ export function useConversations() {
     [refresh],
   );
 
-  return { conversations, connected, create, resume, rename, remove, refresh };
+  return { conversations, connected, loadedOnce, create, resume, rename, remove, refresh };
 }

@@ -237,45 +237,6 @@
   min-height: 0;
 }
 
-/* Group labels */
-.conv-group {
-  margin-bottom: 8px;
-}
-
-.conv-group-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 8px 12px 4px;
-  user-select: none;
-}
-
-.conv-group-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.conv-group-dot.running {
-  background: var(--green-bright);
-  box-shadow: 0 0 6px rgba(63, 185, 80, 0.4);
-}
-
-.conv-group-dot.detached {
-  background: var(--yellow, #d29922);
-  box-shadow: 0 0 6px rgba(210, 153, 34, 0.4);
-}
-
-.conv-group-dot.dead {
-  background: var(--text-faint);
-}
-
 /* Conversation item */
 .conv-item {
   padding: 8px 10px;
@@ -700,139 +661,6 @@
   background: var(--green);
   border-color: var(--green);
   color: #fff;
-}
-
-/* Task panel */
-.task-panel {
-  padding: 0 12px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.task-add {
-  display: grid;
-  grid-template-columns: 1fr 28px;
-  gap: 6px;
-  align-items: center;
-}
-
-.task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.task-row-wrapper {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.task-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 3px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background var(--transition-fast);
-}
-
-.task-row:hover {
-  background: var(--bg-hover);
-}
-
-.task-row.has-binding {
-  color: var(--text-primary);
-}
-
-.task-row.stale {
-  opacity: 0.7;
-}
-
-.task-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-faint);
-  flex-shrink: 0;
-}
-
-.task-row.has-binding .task-dot {
-  background: var(--blue);
-}
-
-.task-row.stale .task-dot {
-  background: var(--red);
-}
-
-.task-title {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--text-primary);
-}
-
-.task-binding-label {
-  font-size: 10px;
-  color: var(--blue);
-  background: var(--blue-dim);
-  padding: 1px 5px;
-  border-radius: 3px;
-  flex-shrink: 0;
-  max-width: 90px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-binding-label.muted {
-  color: var(--text-faint);
-  background: transparent;
-}
-
-.task-binding-label.stale {
-  color: var(--red);
-  background: var(--red-dim);
-}
-
-.task-remove {
-  background: none;
-  border: none;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: 14px;
-  padding: 0;
-  line-height: 1;
-  border-radius: 3px;
-  width: 18px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all var(--transition-fast);
-}
-
-.task-remove:hover {
-  color: var(--red);
-  background: var(--red-dim);
-}
-
-.task-binding-picker {
-  padding: 2px 6px 4px;
-}
-
-.task-empty {
-  font-size: 11px;
-  color: var(--text-faint);
-  padding: 6px 4px;
-  text-align: center;
 }
 
 .btn-copy {
@@ -2253,4 +2081,94 @@
 
 .url-input-field::placeholder {
   color: var(--text-secondary);
+}
+
+/* Task tree: task rows hold their agents, agents hold their files.
+   Indentation is the only structural cue, so the steps are deliberate. */
+.task-group {
+  margin-bottom: 8px;
+}
+
+.row-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.row-chevron:hover {
+  color: var(--text-primary);
+}
+
+/* Kept in flow rather than removed so rows without children still align
+   their status dots with rows that have them. */
+.row-chevron-hidden {
+  visibility: hidden;
+  cursor: default;
+}
+
+.conv-item.agent-row {
+  padding-left: 26px;
+}
+
+.btn-new-agent {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast);
+}
+
+.conv-item:hover .btn-new-agent {
+  opacity: 0.4;
+}
+
+/* !important mirrors .btn-delete: the row-hover rule above is more specific
+   and would otherwise keep this button dim under its own cursor. */
+.btn-new-agent:hover {
+  opacity: 1 !important;
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* Files sit one step deeper than the agent that opened them, so a root's
+   files read as distinct from its sibling agent rows. */
+.conv-item.file-row {
+  padding-left: 46px;
+  gap: 6px;
+}
+
+.conv-item.file-row-nested {
+  padding-left: 62px;
+}
+
+.file-row-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.conv-item.file-row .conv-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

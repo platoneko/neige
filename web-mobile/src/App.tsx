@@ -93,6 +93,7 @@ function App() {
       {menuConv && (
         <CardMenu
           conv={menuConv}
+          conversations={conversations}
           onRename={async (title) => {
             try {
               await renameConversation(menuConv.id, title)

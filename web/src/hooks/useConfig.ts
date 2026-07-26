@@ -18,20 +18,12 @@ export interface RecentFile {
   baseCwd?: string;
 }
 
-export interface Task {
-  id: string;
-  title: string;
-  bound_conv_id?: string;
-  created_at: string;
-}
-
 export interface NeigeConfig {
   proxy?: string;
   defaultProgram?: string;
   portForwards?: PortForward[];
   recentCommands?: RecentCommand[];
   recentFiles?: RecentFile[];
-  tasks?: Task[];
 }
 
 export function useConfig() {

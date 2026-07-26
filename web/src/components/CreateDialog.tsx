@@ -22,11 +22,18 @@ interface CreateDialogProps {
   onCreate: (req: CreateConvRequest) => void;
   config: NeigeConfig;
   onConfigUpdate: (patch: Partial<NeigeConfig>) => void;
+  /**
+   * Present when creating an agent inside an existing task. Locks cwd to
+   * the task's directory — a child agent that opened its own worktree
+   * would land outside the task, which is why the worktree block is
+   * hidden and use_worktree forced off in this mode.
+   */
+  parent?: { id: string; title: string; cwd: string };
 }
 
 const PROGRAMS = ['claude', 'bash', 'zsh', 'python3', 'node'];
 
-export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }: CreateDialogProps) {
+export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate, parent }: CreateDialogProps) {
   const [title, setTitle] = useState('');
   const [mode, setMode] = useState<SessionModeTag>('terminal');
   const [program, setProgram] = useState('claude');
@@ -51,7 +58,7 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
       setMode('terminal');
       setProgram('claude');
       setCustomProgram('');
-      setCwd('');
+      setCwd(parent?.cwd ?? '');
       setProxy(config.proxy || '');
       setUseWorktree(true);
       setWorktreeName('');
@@ -61,7 +68,7 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
       setSuggestions([]);
       setShowSuggestions(false);
     }
-  }, [open, config.proxy]);
+  }, [open, config.proxy, parent?.cwd]);
 
   const browse = useCallback(async (path: string) => {
     try {
@@ -152,16 +159,20 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
     effectiveProgram === 'claude' || effectiveProgram.startsWith('claude ');
 
   const handleSubmit = async () => {
+    // A child agent's cwd defaults to its task's, so deriving the name from
+    // the directory basename would usually just echo the task title — two
+    // identically named rows and a tab reading "my-repo: my-repo". Name the
+    // role instead.
     const effectiveTitle =
       title.trim() ||
-      cwd.split('/').filter(Boolean).pop() ||
+      (parent ? 'agent' : cwd.split('/').filter(Boolean).pop()) ||
       'untitled';
     const trimmedCwd = cwd.trim();
     const trimmedWorktreeName = worktreeName.trim();
 
     // Worktree validation is terminal-mode only — chat mode doesn't pipe
     // --worktree to claude yet, so skip the git-repo check entirely.
-    if (mode === 'terminal' && useWorktree && isClaudeProgram && trimmedWorktreeName) {
+    if (!parent && mode === 'terminal' && useWorktree && isClaudeProgram && trimmedWorktreeName) {
       if (!/^[A-Za-z0-9._-]+$/.test(trimmedWorktreeName)) {
         setWorktreeError(
           'Worktree name can only contain letters, digits, dots, underscores, and hyphens.',
@@ -169,7 +180,7 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
         return;
       }
     }
-    if (mode === 'terminal' && useWorktree && isClaudeProgram) {
+    if (!parent && mode === 'terminal' && useWorktree && isClaudeProgram) {
       try {
         const ok = await isGitRepo(trimmedCwd);
         if (!ok) {
@@ -192,13 +203,19 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
       program: effectiveProgram,
       cwd: trimmedCwd,
       proxy: proxyVal || undefined,
-      // In chat mode the backend doesn't yet pass --worktree to claude,
-      // so force-disable on the wire even if the user toggled it.
-      use_worktree: mode === 'chat' ? false : useWorktree,
+      // Parent mode hides the worktree block, so `useWorktree` still holds
+      // whatever the last top-level create left in state — force it off
+      // rather than letting an invisible toggle through. Chat mode never
+      // gets one either: the backend doesn't pass --worktree in that path.
+      use_worktree: parent || mode === 'chat' ? false : useWorktree,
       worktree_name:
-        mode === 'terminal' && useWorktree && trimmedWorktreeName
+        !parent && mode === 'terminal' && useWorktree && trimmedWorktreeName
           ? trimmedWorktreeName
           : undefined,
+      // The dialog carries the ownership itself so `handleCreate` stays
+      // parent-agnostic — the Ctrl+N quick launcher shares that callback and
+      // must keep producing top-level tasks.
+      parent_id: parent?.id,
     };
     // Chat mode requires a unique addressing handle (`name`); the dialog
     // doesn't yet expose a separate input for it, so seed it from the
@@ -234,9 +251,13 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
         }}
       >
         <div onKeyDown={handleKeyDown}>
-          <Dialog.Title>New Conversation</Dialog.Title>
+          <Dialog.Title>
+            {parent ? `New Agent in "${parent.title}"` : 'New Task'}
+          </Dialog.Title>
           <Dialog.Description size="2" color="gray" mb="4">
-            Configure and launch a Claude Code session.
+            {parent
+              ? 'Starts in the task directory by default — change it if this agent works elsewhere.'
+              : 'Configure and launch a Claude Code session.'}
           </Dialog.Description>
 
           <Flex direction="column" gap="4">
@@ -311,9 +332,11 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder={
-                  cwd
-                    ? cwd.split('/').filter(Boolean).pop() || ''
-                    : 'Auto from directory name'
+                  parent
+                    ? 'agent'
+                    : cwd
+                      ? cwd.split('/').filter(Boolean).pop() || ''
+                      : 'Auto from directory name'
                 }
               />
             </Box>
@@ -364,7 +387,7 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate }
               />
             </Box>
 
-            {isClaudeProgram && mode === 'terminal' && (
+            {isClaudeProgram && mode === 'terminal' && !parent && (
               <Card>
                 <Flex direction="column" gap="3">
                   <Text as="label" size="2">

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { type DockviewApi } from 'dockview';
 import { Dialog, DialogContent, useToast } from '@neige/shared';
 import { Sidebar } from './components/Sidebar';
@@ -9,32 +9,67 @@ import { FilePicker } from './components/FilePicker';
 import { QuickLauncher } from './components/QuickLauncher';
 import { useConversations } from './hooks/useConversations';
 import { useConfig, type RecentFile } from './hooks/useConfig';
-import type { CreateConvRequest } from './types';
+import { groupIntoTasks, tabTitle, type OpenFile } from './tasks';
+import type { ConvInfo, CreateConvRequest } from './types';
 import './App.css';
 
+/**
+ * Panel ids are namespaced by prefix; a conversation panel is the unprefixed
+ * case. Single source of truth because the cleanup effect below *removes*
+ * panels on this answer — a new prefix taught to only one caller would make
+ * that effect silently eat the new panel type.
+ */
+const isConvPanel = (panelId: string) =>
+  !panelId.startsWith('file:') && !panelId.startsWith('web:');
+
 function App() {
-  const { conversations, connected, create, rename, remove } = useConversations();
+  const { conversations, connected, loadedOnce, create, rename, remove } = useConversations();
+  const taskGroups = useMemo(() => groupIntoTasks(conversations), [conversations]);
   const { config, update: updateConfig } = useConfig();
   const { toast } = useToast();
   const [showCreate, setShowCreate] = useState(false);
+  // Set when the create dialog was opened from a task row's + button; the
+  // dialog then locks cwd to this task's directory. Null = new task.
+  const [createParent, setCreateParent] = useState<ConvInfo | null>(null);
   const [showFilePicker, setShowFilePicker] = useState(false);
   const [showQuickLauncher, setShowQuickLauncher] = useState(false);
   const [showUrlInput, setShowUrlInput] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    title: string;
+    /** Child agents that will be removed along with this one. */
+    agentCount: number;
+  } | null>(null);
   const dockviewApiRef = useRef<DockviewApi | null>(null);
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   // Tracks the last conversation panel that was active, so features like the
   // file picker's search root keep working while a file/web panel is focused.
   const [lastConvTabId, setLastConvTabId] = useState<string | null>(null);
+  const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
 
   const syncTabState = useCallback(() => {
     const api = dockviewApiRef.current;
     if (!api) return;
     setOpenTabIds(api.panels.map((p) => p.id));
+    setOpenFiles(
+      api.panels
+        .filter((p) => p.id.startsWith('file:'))
+        .map((p) => {
+          const params = p.params as
+            | { filePath?: string; ownerId?: string }
+            | undefined;
+          return {
+            panelId: p.id,
+            filePath: params?.filePath ?? '',
+            fileName: p.title ?? '',
+            ownerId: params?.ownerId,
+          };
+        }),
+    );
     const activeId = api.activePanel?.id ?? null;
     setActiveTabId(activeId);
-    if (activeId && !activeId.startsWith('file:') && !activeId.startsWith('web:')) {
+    if (activeId && isConvPanel(activeId)) {
       setLastConvTabId(activeId);
     }
   }, []);
@@ -52,8 +87,9 @@ function App() {
       }
 
       const conv = conversations.find((c) => c.id === id);
-      // Use provided title, or look up from current conversations
-      const resolvedTitle = title ?? conv?.title ?? 'untitled';
+      // A caller-supplied title is taken verbatim and bypasses tabTitle, so
+      // passing a bare conv.title here would silently drop the task prefix.
+      const resolvedTitle = title ?? (conv ? tabTitle(conv, conversations) : 'untitled');
       // Chat-mode sessions render a ChatView; everything else uses xterm.
       // Caller can pass modeOverride to avoid stale-state lookup right after
       // create() resolves (the conversations array may not have re-rendered yet).
@@ -74,7 +110,12 @@ function App() {
     async (req: CreateConvRequest) => {
       try {
         const conv = await create(req);
-        openTab(conv.id, conv.title, conv.mode);
+        // openTab's own lookup can't see a session created moments ago, so
+        // title and mode must be passed explicitly or the tab falls back to
+        // 'untitled'/'terminal'. Splicing conv into the array is belt-and-braces
+        // only: tabTitle uses that array solely to resolve the parent, which is
+        // already in `conversations`.
+        openTab(conv.id, tabTitle(conv, [...conversations, conv]), conv.mode);
         // Save to recent commands
         const recent = config.recentCommands || [];
         const entry = { program: req.program, cwd: req.cwd, title: req.title, use_worktree: req.use_worktree };
@@ -91,7 +132,7 @@ function App() {
         });
       }
     },
-    [create, openTab, config.recentCommands, updateConfig, toast],
+    [create, openTab, conversations, config.recentCommands, updateConfig, toast],
   );
 
   const openFile = useCallback(
@@ -105,11 +146,19 @@ function App() {
         existing.api.setActive();
         return;
       }
+      // Moor the panel to the agent it was opened from so the sidebar can
+      // nest it there. lastConvTabId already follows the active conversation,
+      // so this lands on the same agent as the file picker's search root —
+      // including its self-healing lookup: resolving through `conversations`
+      // means a deleted id misses and falls through, where trusting the id
+      // directly would stamp an owner the cleanup effect then kills on sight.
+      const ownerId =
+        conversations.find((c) => c.id === lastConvTabId)?.id ?? conversations[0]?.id;
       api.addPanel({
         id: panelId,
         title: fileName,
         component: 'fileViewer',
-        params: { filePath, baseCwd },
+        params: { filePath, baseCwd, ownerId },
       });
       // Save to recent files (preserve baseCwd so re-opens still get a relative path)
       const recent = config.recentFiles || [];
@@ -118,7 +167,7 @@ function App() {
       if (baseCwd) entry.baseCwd = baseCwd;
       updateConfig({ recentFiles: [entry, ...filtered].slice(0, 20) });
     },
-    [config.recentFiles, updateConfig],
+    [config.recentFiles, updateConfig, lastConvTabId, conversations],
   );
 
   const openUrl = useCallback(
@@ -145,6 +194,16 @@ function App() {
     },
     [],
   );
+
+  const focusPanel = useCallback((panelId: string) => {
+    dockviewApiRef.current?.getPanel(panelId)?.api.setActive();
+  }, []);
+
+  const closePanel = useCallback((panelId: string) => {
+    const api = dockviewApiRef.current;
+    const panel = api?.getPanel(panelId);
+    if (api && panel) api.removePanel(panel);
+  }, []);
 
   // Ctrl+P to open file picker, Ctrl+N to open quick launcher, Ctrl+L to open URL input,
   // Ctrl+W to close the active file panel (skips terminals so shell delete-word still works;
@@ -208,39 +267,85 @@ function App() {
     setDeleteTarget(null);
   }, [deleteTarget, remove, toast]);
 
-  // Sync conversation titles → dockview tab titles
+  // Sync conversation titles → dockview tab titles. Renaming a task also
+  // reflows its children's tabs, since their prefix is the task name.
   useEffect(() => {
     const api = dockviewApiRef.current;
     if (!api) return;
     for (const panel of api.panels) {
       const conv = conversations.find((c) => c.id === panel.id);
-      if (conv && panel.title !== conv.title) {
-        panel.setTitle(conv.title);
-      }
+      if (!conv) continue;
+      const next = tabTitle(conv, conversations);
+      if (panel.title !== next) panel.setTitle(next);
     }
   }, [conversations]);
+
+  // Panels don't outlive their session. A conversation panel whose session
+  // is gone, and a file panel whose owning agent is gone, both lose their
+  // place in the tree. `handleDeleteConfirm` only removes the one panel the
+  // user clicked, so this is what closes a task's child agents when the
+  // delete cascades — and what handles sessions removed by another client.
+  // Two gates, two jobs. `loadedOnce` is what stops a list that hasn't
+  // arrived from reading as "every session is gone": layout restore issues
+  // its own fetch and can finish first, and panels removed here are then
+  // persisted by the debounced layout writer — the user's tabs would be gone
+  // for good, not just this launch. `connected` defers teardown across a
+  // network blip: a failed request never writes `conversations` (the hook
+  // sets it only on success), so the list freezes at its last good value
+  // and keeps aging while the server is unreachable. Tearing panels down
+  // against that snapshot would act on evidence older than the outage, so
+  // wait for a fresh confirmation — the panels cost nothing to keep.
+  useEffect(() => {
+    const api = dockviewApiRef.current;
+    if (!api || !loadedOnce || !connected) return;
+    const alive = new Set(conversations.map((c) => c.id));
+    for (const panel of api.panels) {
+      if (!isConvPanel(panel.id)) continue;
+      if (!alive.has(panel.id)) api.removePanel(panel);
+    }
+    for (const f of openFiles) {
+      if (f.ownerId && !alive.has(f.ownerId)) {
+        const panel = api.getPanel(f.panelId);
+        if (panel) api.removePanel(panel);
+      }
+    }
+  }, [conversations, openFiles, loadedOnce, connected]);
 
   return (
     <div className="app">
       <Sidebar
         conversations={conversations}
+        tasks={taskGroups}
+        onNewAgent={(root) => {
+          setCreateParent(root);
+          setShowCreate(true);
+        }}
         connected={connected}
         openTabs={openTabIds}
         activeTab={activeTabId}
+        openFiles={openFiles}
+        onSelectFile={focusPanel}
+        onCloseFile={closePanel}
         onSelect={openTab}
         onRename={rename}
         onDelete={(id) => {
           const conv = conversations.find((c) => c.id === id);
-          setDeleteTarget({ id, title: conv?.title ?? 'untitled' });
+          // Only a task root heads a group, so a child agent's delete lands
+          // here with no group and a count of 0 — it takes nothing with it.
+          const group = taskGroups.find((g) => g.root.id === id);
+          setDeleteTarget({
+            id,
+            title: conv?.title ?? 'untitled',
+            agentCount: group?.children.length ?? 0,
+          });
         }}
-        onNew={() => setShowCreate(true)}
+        onNew={() => {
+          setCreateParent(null);
+          setShowCreate(true);
+        }}
         portForwards={config.portForwards || []}
         onPortForwardUpdate={(ports) => {
           updateConfig({ portForwards: ports });
-        }}
-        tasks={config.tasks || []}
-        onTasksUpdate={(tasks) => {
-          updateConfig({ tasks });
         }}
       />
       <main className="main">
@@ -305,15 +410,29 @@ function App() {
       />
       <CreateDialog
         open={showCreate}
+        // `createParent` deliberately survives the close. Radix keeps the
+        // content mounted through its exit animation, so clearing here would
+        // visibly re-render the dialog as top-level on the way out — the
+        // title flips and the worktree card pops back in. Both open paths
+        // set `createParent` unconditionally, so nothing stale can leak in.
         onClose={() => setShowCreate(false)}
         onCreate={handleCreate}
         config={config}
         onConfigUpdate={updateConfig}
+        parent={
+          createParent
+            ? { id: createParent.id, title: createParent.title, cwd: createParent.cwd }
+            : undefined
+        }
       />
       <ConfirmDialog
         open={deleteTarget !== null}
-        title="Delete Session"
-        message={`Permanently delete "${deleteTarget?.title}"? This will remove the session and its metadata.`}
+        title={deleteTarget && deleteTarget.agentCount > 0 ? 'Delete Task' : 'Delete Session'}
+        message={
+          deleteTarget && deleteTarget.agentCount > 0
+            ? `Permanently delete task "${deleteTarget.title}" and its ${deleteTarget.agentCount} agent${deleteTarget.agentCount === 1 ? '' : 's'}? This will remove all sessions and their metadata.`
+            : `Permanently delete "${deleteTarget?.title}"? This will remove the session and its metadata.`
+        }
         confirmLabel="Delete"
         onConfirm={handleDeleteConfirm}
         onCancel={() => setDeleteTarget(null)}

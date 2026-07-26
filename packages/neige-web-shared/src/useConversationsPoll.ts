@@ -10,6 +10,14 @@ export interface UseConversationsPollOptions {
 export interface UseConversationsPollApi {
   conversations: ConvInfo[];
   connected: boolean;
+  /**
+   * True once any fetch has resolved, never false again. `conversations` is
+   * `[]` both before the first fetch and when the server genuinely has none,
+   * and `connected` starts `true`, so this is the only way to tell the two
+   * apart. A consumer that destroys state for sessions it can't find in the
+   * list must gate on it.
+   */
+  loadedOnce: boolean;
   refresh: () => Promise<void>;
 }
 
@@ -24,12 +32,16 @@ export function useConversationsPoll(
   const intervalMs = opts.intervalMs ?? 5000;
   const [conversations, setConversations] = useState<ConvInfo[]>([]);
   const [connected, setConnected] = useState(true);
+  // Set by whichever fetch resolves first — `refresh` can beat the interval
+  // poll, since callers fire it right after a create/rename/delete.
+  const [loadedOnce, setLoadedOnce] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const list = await listConversations();
       setConversations(list);
       setConnected(true);
+      setLoadedOnce(true);
     } catch {
       setConnected(false);
     }
@@ -47,6 +59,7 @@ export function useConversationsPoll(
         if (controller.signal.aborted) return;
         setConversations(list);
         setConnected(true);
+        setLoadedOnce(true);
         failCount = 0;
       } catch {
         if (controller.signal.aborted) return;
@@ -69,5 +82,5 @@ export function useConversationsPoll(
     };
   }, [intervalMs]);
 
-  return { conversations, connected, refresh };
+  return { conversations, connected, loadedOnce, refresh };
 }

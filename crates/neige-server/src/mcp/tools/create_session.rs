@@ -45,6 +45,8 @@ pub async fn handle(ctx: ToolCtx, args: Args) -> Result<Value, String> {
         // semantics, so we resolve it here.
         use_worktree: args.use_worktree.unwrap_or(true),
         worktree_name: args.worktree_name,
+        // MCP has no task surface yet, so sessions it creates are roots.
+        parent_id: None,
         // MCP forces chat mode — there's no terminal client on the other
         // end of an MCP call. The Chat variant carries the addressing name.
         mode: SessionMode::Chat { name: args.name },

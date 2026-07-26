@@ -72,6 +72,12 @@ pub struct SessionMeta {
     pub worktree_branch: Option<String>,
     pub created_at: String,
     pub last_active: String,
+    /// The task this agent belongs to. `None` = this agent IS a task (its
+    /// title is the task name, its cwd the task directory). `Some(root_id)`
+    /// = child agent under that root. Nesting is exactly one level deep.
+    /// Skipped when absent so root agents keep the pre-tasks wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
     #[serde(flatten)]
     pub mode: SessionMode,
 }
@@ -87,6 +93,8 @@ struct SessionMetaRaw {
     worktree_branch: Option<String>,
     created_at: String,
     last_active: String,
+    #[serde(default)]
+    parent_id: Option<Uuid>,
     #[serde(flatten)]
     mode_extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -105,6 +113,7 @@ impl<'de> Deserialize<'de> for SessionMeta {
             worktree_branch: raw.worktree_branch,
             created_at: raw.created_at,
             last_active: raw.last_active,
+            parent_id: raw.parent_id,
             mode,
         })
     }
@@ -136,6 +145,18 @@ pub struct ConvInfo {
     pub created_at: String,
     pub use_worktree: bool,
     pub worktree_branch: Option<String>,
+    /// See `SessionMeta::parent_id`. The absence of `skip_serializing_if`
+    /// here — the one thing that differs from `SessionMeta`'s copy of this
+    /// field — is load-bearing: it makes roots emit `"parent_id":null`, so
+    /// the web client can type this as `string | null` instead of an
+    /// optional key. Adding the skip to "unify the serde policy" breaks the
+    /// hierarchy silently and totally: roots stop emitting the key,
+    /// `parent.parent_id` reads `undefined`, `tasks.ts`'s
+    /// `parent.parent_id !== null` goes true for every parent, and the
+    /// sidebar and tab titles both flatten with no error anywhere.
+    /// `parent_id_always_serialized_for_roots` locks this.
+    #[serde(default)]
+    pub parent_id: Option<Uuid>,
     #[serde(flatten)]
     pub mode: SessionMode,
 }
@@ -151,6 +172,7 @@ pub struct Conversation {
     pub proxy: Option<String>,
     pub use_worktree: bool,
     pub worktree_branch: Option<String>,
+    pub parent_id: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub mode: SessionMode,
     pub client: Option<SessionClient>,
@@ -186,6 +208,7 @@ impl Conversation {
             created_at: self.created_at.to_rfc3339(),
             use_worktree: self.use_worktree,
             worktree_branch: self.worktree_branch.clone(),
+            parent_id: self.parent_id,
             mode: self.mode.clone(),
         }
     }
@@ -201,6 +224,7 @@ impl Conversation {
             worktree_branch: self.worktree_branch.clone(),
             created_at: self.created_at.to_rfc3339(),
             last_active: chrono::Utc::now().to_rfc3339(),
+            parent_id: self.parent_id,
             mode: self.mode.clone(),
         }
     }
@@ -223,6 +247,9 @@ pub struct CreateConvRequest {
     pub use_worktree: bool,
     #[serde(default)]
     pub worktree_name: Option<String>,
+    /// Create this agent inside an existing task. Absent = new task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
     #[serde(flatten)]
     pub mode: SessionMode,
 }
@@ -239,6 +266,8 @@ struct CreateConvRequestRaw {
     use_worktree: bool,
     #[serde(default)]
     worktree_name: Option<String>,
+    #[serde(default)]
+    parent_id: Option<Uuid>,
     #[serde(flatten)]
     mode_extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -268,6 +297,7 @@ impl<'de> Deserialize<'de> for CreateConvRequest {
             proxy: raw.proxy,
             use_worktree: raw.use_worktree,
             worktree_name: raw.worktree_name,
+            parent_id: raw.parent_id,
             mode,
         })
     }
@@ -887,6 +917,7 @@ impl ConversationManager {
                 proxy: meta.proxy,
                 use_worktree: meta.use_worktree,
                 worktree_branch: meta.worktree_branch,
+                parent_id: meta.parent_id,
                 created_at,
                 mode: meta.mode,
                 client: None, // detached
@@ -897,6 +928,29 @@ impl ConversationManager {
         if !self.convs.is_empty() {
             tracing::info!("loaded {} sessions from disk", self.convs.len());
         }
+    }
+
+    /// Validate that `parent_id` names an existing root agent. Split out of
+    /// `create` so the rule is unit-testable without spawning a daemon.
+    fn validate_parent(&self, parent_id: &Uuid) -> Result<(), String> {
+        let parent = self
+            .convs
+            .get(parent_id)
+            .ok_or_else(|| format!("parent session {parent_id} not found"))?;
+        if parent.parent_id.is_some() {
+            return Err("agents cannot nest more than one level".to_string());
+        }
+        Ok(())
+    }
+
+    /// Ids of the child agents belonging to task `id`. Empty when `id` is
+    /// itself a child, since nesting is one level deep.
+    fn children_of(&self, id: &Uuid) -> Vec<Uuid> {
+        self.convs
+            .values()
+            .filter(|c| c.parent_id == Some(*id))
+            .map(|c| c.id)
+            .collect()
     }
 
     pub async fn create(&mut self, req: CreateConvRequest) -> Result<ConvInfo, String> {
@@ -931,6 +985,10 @@ impl ConversationManager {
             && self.chat_by_name.contains_key(name)
         {
             return Err(format!("chat session name '{name}' already in use"));
+        }
+
+        if let Some(parent_id) = req.parent_id {
+            self.validate_parent(&parent_id)?;
         }
 
         let (client, chat_client, worktree_branch) = match &req.mode {
@@ -996,6 +1054,7 @@ impl ConversationManager {
             proxy: req.proxy,
             use_worktree,
             worktree_branch,
+            parent_id: req.parent_id,
             created_at: chrono::Utc::now(),
             mode: req.mode,
             client,
@@ -1156,8 +1215,21 @@ impl ConversationManager {
         Ok(conv.info())
     }
 
-    /// Remove a conversation and clean up its session file.
+    /// Remove a conversation and clean up its session file. Deleting a task
+    /// (a root agent) takes its child agents with it.
     pub async fn remove(&mut self, id: &Uuid) {
+        // `children_of` returns an owned Vec rather than an iterator because
+        // `remove_one` takes `&mut self` — borrowing `convs` for the loop and
+        // mutating it in the body can't coexist. Making the kill synchronous
+        // would not change that.
+        for child in self.children_of(id) {
+            self.remove_one(&child).await;
+        }
+        self.remove_one(id).await;
+    }
+
+    /// Remove exactly one conversation, no cascade.
+    async fn remove_one(&mut self, id: &Uuid) {
         // Kill the session daemon so the inner program stops; dropping only
         // our socket would leave the daemon (and the claude it's running)
         // orphaned.
@@ -1223,6 +1295,7 @@ mod tests {
             worktree_branch: None,
             created_at: "2024-01-01T00:00:00Z".into(),
             last_active: "2024-01-01T00:00:00Z".into(),
+            parent_id: None,
             mode: SessionMode::Terminal,
         };
         let s = serde_json::to_string(&meta).unwrap();
@@ -1247,6 +1320,7 @@ mod tests {
             worktree_branch: None,
             created_at: "2024-01-01T00:00:00Z".into(),
             last_active: "2024-01-01T00:00:00Z".into(),
+            parent_id: None,
             mode: SessionMode::Chat {
                 name: "scraper".into(),
             },
@@ -1261,6 +1335,29 @@ mod tests {
                 name: "scraper".into()
             }
         );
+    }
+
+    #[test]
+    fn parent_id_always_serialized_for_roots() {
+        // A root must put `parent_id` on the wire as an explicit null. If it
+        // is ever skipped instead, the web client reads `undefined` and the
+        // whole task hierarchy flattens without raising anything — see the
+        // field's doc comment on `ConvInfo`.
+        let info = ConvInfo {
+            id: Uuid::nil(),
+            title: "t".into(),
+            status: Status::Detached,
+            program: "claude".into(),
+            cwd: "/tmp".into(),
+            effective_cwd: "/tmp".into(),
+            created_at: "2024-01-01T00:00:00Z".into(),
+            use_worktree: false,
+            worktree_branch: None,
+            parent_id: None,
+            mode: SessionMode::Terminal,
+        };
+        let s = serde_json::to_string(&info).unwrap();
+        assert!(s.contains(r#""parent_id":null"#), "got {s}");
     }
 
     #[test]
@@ -1564,5 +1661,226 @@ mod tests {
             serde_json::to_string(&TodoStatus::Completed).unwrap(),
             "\"completed\""
         );
+    }
+
+    #[test]
+    fn legacy_session_meta_loads_without_parent_id() {
+        // Session files written before tasks existed carry no `parent_id`.
+        // They must load as root agents rather than failing to parse.
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000000","title":"t",
+            "program":"claude","cwd":"/tmp","proxy":null,"use_worktree":false,
+            "worktree_branch":null,"created_at":"2024-01-01T00:00:00Z",
+            "last_active":"2024-01-01T00:00:00Z"}"#;
+        let meta: SessionMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.parent_id, None);
+    }
+
+    #[test]
+    fn session_meta_round_trips_parent_id() {
+        let parent = Uuid::new_v4();
+        let meta = SessionMeta {
+            id: Uuid::nil(),
+            title: "t".into(),
+            program: "claude".into(),
+            cwd: "/tmp".into(),
+            proxy: None,
+            use_worktree: false,
+            worktree_branch: None,
+            created_at: "2024-01-01T00:00:00Z".into(),
+            last_active: "2024-01-01T00:00:00Z".into(),
+            parent_id: Some(parent),
+            mode: SessionMode::Terminal,
+        };
+        let s = serde_json::to_string(&meta).unwrap();
+        let parsed: SessionMeta = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed.parent_id, Some(parent));
+    }
+
+    #[test]
+    fn root_session_meta_omits_parent_id_field() {
+        // Root agents keep the pre-tasks wire shape, so a session file written
+        // by this build still parses on a server without the field.
+        let meta = SessionMeta {
+            id: Uuid::nil(),
+            title: "t".into(),
+            program: "claude".into(),
+            cwd: "/tmp".into(),
+            proxy: None,
+            use_worktree: false,
+            worktree_branch: None,
+            created_at: "2024-01-01T00:00:00Z".into(),
+            last_active: "2024-01-01T00:00:00Z".into(),
+            parent_id: None,
+            mode: SessionMode::Terminal,
+        };
+        let s = serde_json::to_string(&meta).unwrap();
+        assert!(!s.contains("parent_id"));
+    }
+
+    #[test]
+    fn create_conv_request_defaults_parent_id_to_none() {
+        let req: CreateConvRequest = serde_json::from_str(r#"{"title":"t"}"#).unwrap();
+        assert_eq!(req.parent_id, None);
+    }
+
+    #[test]
+    fn create_conv_request_accepts_parent_id() {
+        let parent = Uuid::new_v4();
+        let body = format!(r#"{{"title":"t","parent_id":"{parent}"}}"#);
+        let req: CreateConvRequest = serde_json::from_str(&body).unwrap();
+        assert_eq!(req.parent_id, Some(parent));
+    }
+
+    fn conv_fixture(id: Uuid, parent_id: Option<Uuid>) -> Conversation {
+        Conversation {
+            id,
+            title: "t".into(),
+            program: "bash".into(),
+            cwd: "/tmp".into(),
+            proxy: None,
+            use_worktree: false,
+            worktree_branch: None,
+            parent_id,
+            created_at: chrono::Utc::now(),
+            mode: SessionMode::Terminal,
+            client: None,
+            chat_client: None,
+        }
+    }
+
+    fn manager_with(convs: &[(Uuid, Option<Uuid>)]) -> ConversationManager {
+        let dir = tempdir_for_test();
+        let mut mgr = ConversationManager::new(dir.to_str().unwrap());
+        for (id, parent) in convs {
+            mgr.convs.insert(*id, conv_fixture(*id, *parent));
+        }
+        mgr
+    }
+
+    #[test]
+    fn validate_parent_rejects_unknown_parent() {
+        let mgr = manager_with(&[]);
+        let err = mgr.validate_parent(&Uuid::new_v4()).unwrap_err();
+        assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_parent_accepts_a_root_agent() {
+        let root = Uuid::new_v4();
+        let mgr = manager_with(&[(root, None)]);
+        assert!(mgr.validate_parent(&root).is_ok());
+    }
+
+    #[test]
+    fn validate_parent_rejects_two_level_nesting() {
+        // A child agent can't itself become a task root — the sidebar only
+        // renders one level of nesting.
+        let root = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        let mgr = manager_with(&[(root, None), (child, Some(root))]);
+        let err = mgr.validate_parent(&child).unwrap_err();
+        assert!(err.contains("one level"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn children_of_returns_only_direct_children() {
+        let root = Uuid::new_v4();
+        let other_root = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        let mgr = manager_with(&[
+            (root, None),
+            (other_root, None),
+            (a, Some(root)),
+            (b, Some(root)),
+            (foreign, Some(other_root)),
+        ]);
+
+        let mut kids = mgr.children_of(&root);
+        kids.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(kids, expected);
+
+        // Asking a child for its children is empty, and an unrelated task's
+        // child never leaks in.
+        assert!(mgr.children_of(&a).is_empty());
+        assert_eq!(mgr.children_of(&other_root), vec![foreign]);
+    }
+
+    /// Surviving session ids, sorted so assertions don't depend on HashMap order.
+    fn remaining_ids(mgr: &ConversationManager) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = mgr.convs.keys().copied().collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn remove_task_cascades_to_its_agents() {
+        // Guards the cascade wiring itself, not just `children_of`. The
+        // fixtures have no daemon behind them, so `kill_session` bails on the
+        // missing socket and nothing is spawned or killed for real.
+        let root = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let other_root = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        let mut mgr = manager_with(&[
+            (root, None),
+            (a, Some(root)),
+            (b, Some(root)),
+            (other_root, None),
+            (foreign, Some(other_root)),
+        ]);
+
+        mgr.remove(&root).await;
+
+        let mut expected = vec![other_root, foreign];
+        expected.sort();
+        assert_eq!(remaining_ids(&mgr), expected);
+    }
+
+    #[tokio::test]
+    async fn remove_agent_leaves_its_task_and_siblings() {
+        // The cascade only runs downward — deleting one agent must not take
+        // its task or the sibling agents with it.
+        let root = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let mut mgr = manager_with(&[(root, None), (a, Some(root)), (b, Some(root))]);
+
+        mgr.remove(&a).await;
+
+        let mut expected = vec![root, b];
+        expected.sort();
+        assert_eq!(remaining_ids(&mgr), expected);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_an_agent_nested_under_another_agent() {
+        // Covers the `create` → `validate_parent` wiring. Chat mode on a
+        // manager with no runner configured is what makes this both safe and
+        // load-bearing: the call cannot reach a spawn, and if the parent check
+        // ever stops firing the request fails on the missing-runner error
+        // instead, so the assertion below still catches it.
+        let root = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        let mut mgr = manager_with(&[(root, None), (child, Some(root))]);
+
+        let body = serde_json::json!({
+            "title": "x",
+            "program": "claude",
+            "cwd": "/tmp",
+            "proxy": null,
+            "use_worktree": false,
+            "mode": "chat",
+            "name": "nested",
+            "parent_id": child,
+        });
+        let req: CreateConvRequest = serde_json::from_value(body).unwrap();
+
+        let err = mgr.create(req).await.unwrap_err();
+        assert!(err.contains("one level"), "unexpected error: {err}");
     }
 }
