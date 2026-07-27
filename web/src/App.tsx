@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { type DockviewApi } from 'dockview';
+import { type DockviewApi, type DockviewGroupPanel } from 'dockview';
 import { Dialog, DialogContent, useToast } from '@neige/shared';
 import { Sidebar } from './components/Sidebar';
 import { TerminalPanel } from './components/TerminalPanel';
@@ -20,7 +20,55 @@ import './App.css';
  * that effect silently eat the new panel type.
  */
 const isConvPanel = (panelId: string) =>
-  !panelId.startsWith('file:') && !panelId.startsWith('web:');
+  !panelId.startsWith('file:') &&
+  !panelId.startsWith('web:') &&
+  panelId !== PLACEHOLDER_PANEL_ID;
+
+/** Fixed id for the right-side placeholder that keeps the default split
+ *  alive while no real file is docked. Only one is ever alive at a time. */
+const PLACEHOLDER_PANEL_ID = 'placeholder:right';
+
+/**
+ * Route new panels so a fresh app naturally settles into agent-on-the-left,
+ * files-on-the-right without the user dragging groups apart. Given the kind
+ * being opened, pick a group already holding that kind (put alongside), or —
+ * failing that — the group holding the *other* kind, so we can split off a
+ * new group on the correct side. Groups mixing both kinds don't attract new
+ * panels here; that arrangement is a deliberate user drag we let stand.
+ */
+function routePanelPosition(
+  api: DockviewApi,
+  kind: 'agent' | 'file',
+):
+  | { referenceGroup: DockviewGroupPanel; direction?: 'left' | 'right' }
+  | undefined {
+  const classify = (g: DockviewGroupPanel): 'agent' | 'file' | 'mixed' => {
+    const hasConv = g.panels.some((p) => isConvPanel(p.id));
+    const hasFile = g.panels.some((p) => !isConvPanel(p.id));
+    if (hasConv && hasFile) return 'mixed';
+    return hasConv ? 'agent' : 'file';
+  };
+  const sameKind = api.groups.find((g) => classify(g) === kind);
+  if (sameKind) return { referenceGroup: sameKind };
+  const otherKind = kind === 'agent' ? 'file' : 'agent';
+  const anchor = api.groups.find((g) => classify(g) === otherKind);
+  if (anchor) return { referenceGroup: anchor, direction: kind === 'agent' ? 'left' : 'right' };
+  return undefined;
+}
+
+/** Drop the placeholder once a real file/url panel shares its group — the
+ *  real panel now keeps the split alive, and the placeholder tab becomes
+ *  clutter. The invariant effect will spawn a new placeholder if the group
+ *  later empties out again. */
+function retirePlaceholderIfCoLocated(api: DockviewApi, joinerId: string): void {
+  const placeholder = api.getPanel(PLACEHOLDER_PANEL_ID);
+  if (!placeholder) return;
+  const joiner = api.getPanel(joinerId);
+  if (!joiner) return;
+  if (placeholder.group === joiner.group) {
+    api.removePanel(placeholder);
+  }
+}
 
 function App() {
   const { conversations, connected, loadedOnce, create, rename, remove } = useConversations();
@@ -96,11 +144,13 @@ function App() {
       const mode = modeOverride ?? conv?.mode ?? 'terminal';
       const component = mode === 'chat' ? 'chat' : 'terminal';
 
+      const position = routePanelPosition(api, 'agent');
       api.addPanel({
         id,
         title: resolvedTitle,
         component,
         params: { convId: id },
+        ...(position ? { position } : {}),
       });
     },
     [conversations],
@@ -154,12 +204,15 @@ function App() {
       // directly would stamp an owner the cleanup effect then kills on sight.
       const ownerId =
         conversations.find((c) => c.id === lastConvTabId)?.id ?? conversations[0]?.id;
+      const position = routePanelPosition(api, 'file');
       api.addPanel({
         id: panelId,
         title: fileName,
         component: 'fileViewer',
         params: { filePath, baseCwd, ownerId },
+        ...(position ? { position } : {}),
       });
+      retirePlaceholderIfCoLocated(api, panelId);
       // Save to recent files (preserve baseCwd so re-opens still get a relative path)
       const recent = config.recentFiles || [];
       const filtered = recent.filter((r) => r.path !== filePath);
@@ -185,12 +238,15 @@ function App() {
       try {
         title = new URL(url.startsWith('http') ? url : `https://${url}`).hostname;
       } catch { /* use full url */ }
+      const position = routePanelPosition(api, 'file');
       api.addPanel({
         id: panelId,
         title,
         component: 'webView',
         params: { url },
+        ...(position ? { position } : {}),
       });
+      retirePlaceholderIfCoLocated(api, panelId);
     },
     [],
   );
@@ -310,6 +366,36 @@ function App() {
       }
     }
   }, [conversations, openFiles, loadedOnce, connected]);
+
+  // Keep the agent-left / files-right split alive: whenever there's an agent
+  // panel but nothing on the file side (either the last file was closed or
+  // it never opened), spawn a placeholder to hold the right group open. The
+  // placeholder retires the moment a real file/url joins its group; and if
+  // the last agent goes away it retires too, so an empty app never shows a
+  // lone hint tab.
+  useEffect(() => {
+    const api = dockviewApiRef.current;
+    if (!api) return;
+    const placeholder = api.getPanel(PLACEHOLDER_PANEL_ID);
+    const hasConv = api.panels.some((p) => isConvPanel(p.id));
+    const hasFile = api.panels.some(
+      (p) => !isConvPanel(p.id) && p.id !== PLACEHOLDER_PANEL_ID,
+    );
+    if (!hasConv) {
+      if (placeholder) api.removePanel(placeholder);
+      return;
+    }
+    if (hasFile || placeholder) return;
+    const position = routePanelPosition(api, 'file');
+    if (!position) return;
+    api.addPanel({
+      id: PLACEHOLDER_PANEL_ID,
+      title: ' ',
+      component: 'placeholder',
+      position,
+      inactive: true,
+    });
+  }, [openTabIds]);
 
   return (
     <div className="app">

@@ -45,11 +45,24 @@ function ChatPanelWrapper({ params }: IDockviewPanelProps<{ convId: string }>) {
   return <ChatPanel sessionId={params.convId} />;
 }
 
+/** Holds a right-side group open when no files are docked, so the layout
+ *  stays in the user's default agent-left / files-right split instead of
+ *  the agent panel snapping back to full width. Removed automatically the
+ *  moment a real file panel joins the group. */
+function PlaceholderComponent() {
+  return (
+    <div className="placeholder-panel">
+      <span>Open a file with Ctrl+P</span>
+    </div>
+  );
+}
+
 const components = {
   terminal: TerminalComponent,
   fileViewer: FileViewerComponent,
   webView: WebViewComponent,
   chat: ChatPanelWrapper,
+  placeholder: PlaceholderComponent,
 };
 
 export function TerminalPanel({ dockviewApiRef, onTabClose, onTabStateChange }: TerminalPanelProps) {

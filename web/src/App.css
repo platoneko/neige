@@ -754,6 +754,20 @@
   position: relative;
 }
 
+/* Empty right-side placeholder that keeps the default agent/files split
+   alive when no real file is docked yet. Understated on purpose so it
+   doesn't compete with a real panel visually. */
+.placeholder-panel {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 20px;
+  user-select: none;
+}
+
 .terminal-container {
   flex: 1;
   padding: 6px 8px;
