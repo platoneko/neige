@@ -3,6 +3,8 @@ import {
   ChevronDown,
   ChevronRight,
   FileText,
+  Folder,
+  FolderOpen,
   MessageSquare,
   Terminal as TerminalIcon,
 } from 'lucide-react';
@@ -130,15 +132,24 @@ function AgentRow({
       >
         {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
       </button>
-      <div className="conv-status-dot-wrapper">
-        <span className={`conv-status-dot ${conv.status}`} />
-      </div>
       <span
-        className={`conv-mode-icon ${conv.mode}`}
-        title={conv.mode === 'chat' ? 'Chat (stream-json)' : 'Terminal (PTY)'}
-        aria-label={conv.mode}
+        className={`conv-kind-icon ${isTask ? 'task' : `agent ${conv.mode}`}`}
+        title={
+          isTask
+            ? 'Task'
+            : conv.mode === 'chat'
+              ? 'Chat agent (stream-json)'
+              : 'Terminal agent (PTY)'
+        }
+        aria-label={isTask ? 'task' : conv.mode}
       >
-        {conv.mode === 'chat' ? (
+        {isTask ? (
+          expanded ? (
+            <FolderOpen size={13} strokeWidth={2} />
+          ) : (
+            <Folder size={13} strokeWidth={2} />
+          )
+        ) : conv.mode === 'chat' ? (
           <MessageSquare size={12} strokeWidth={2} />
         ) : (
           <TerminalIcon size={12} strokeWidth={2} />

@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
+import { Folder, MessageSquare, Terminal as TerminalIcon } from 'lucide-react';
 import { Button } from '@neige/shared';
 import type { ConvInfo } from '../types';
 import type { OpenFile, TaskGroup } from '../tasks';
@@ -145,17 +146,31 @@ export function Sidebar({
             </button>
           </div>
           <div className="conv-list-collapsed">
-            {conversations.map((c) => (
-              <button
-                key={c.id}
-                className={`conv-dot-btn ${activeTab === c.id ? 'active' : ''} ${busyIds.has(c.id) ? 'busy' : ''}`}
-                onClick={() => onSelect(c.id)}
-                title={c.title}
-                aria-label={c.title}
-              >
-                <span className={`conv-status-dot ${c.status}`} />
-              </button>
-            ))}
+            {conversations.map((c) => {
+              const isTask = c.parent_id === null;
+              return (
+                <button
+                  key={c.id}
+                  className={`conv-dot-btn ${activeTab === c.id ? 'active' : ''} ${busyIds.has(c.id) ? 'busy' : ''}`}
+                  onClick={() => onSelect(c.id)}
+                  title={c.title}
+                  aria-label={c.title}
+                >
+                  <span
+                    className={`conv-kind-icon ${isTask ? 'task' : `agent ${c.mode}`}`}
+                    aria-hidden
+                  >
+                    {isTask ? (
+                      <Folder size={14} strokeWidth={2} />
+                    ) : c.mode === 'chat' ? (
+                      <MessageSquare size={13} strokeWidth={2} />
+                    ) : (
+                      <TerminalIcon size={13} strokeWidth={2} />
+                    )}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </>
       ) : (
