@@ -36,7 +36,7 @@ const PROGRAMS = ['claude', 'bash', 'zsh', 'python3', 'node'];
 export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate, parent }: CreateDialogProps) {
   const [title, setTitle] = useState('');
   const [mode, setMode] = useState<SessionModeTag>('terminal');
-  const [program, setProgram] = useState('claude');
+  const [program, setProgram] = useState('zsh');
   const [customProgram, setCustomProgram] = useState('');
   const [cwd, setCwd] = useState('');
   const [proxy, setProxy] = useState('');
@@ -56,7 +56,7 @@ export function CreateDialog({ open, onClose, onCreate, config, onConfigUpdate, 
     if (open) {
       setTitle('');
       setMode('terminal');
-      setProgram('claude');
+      setProgram('zsh');
       setCustomProgram('');
       setCwd(parent?.cwd ?? '');
       setProxy(config.proxy || '');
