@@ -237,8 +237,30 @@ type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 /// sample lands.
 type SharedForeground = Arc<Mutex<Option<bool>>>;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// How long the runtime may spend waiting for blocking tasks once the session
+/// is already torn down. Long enough for a just-killed child's `wait` to
+/// return, short enough that nothing can hold the process open.
+const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
+
+/// Why not `#[tokio::main]`: dropping a multi-thread runtime *waits* for every
+/// blocking task, and this daemon parks two of them for the life of the
+/// session — `spawn_child_waiter` inside `child.wait()`, and the PTY reader
+/// inside a blocking `read`. Neither finishes while the agent is alive, so a
+/// signalled daemon would run its whole cleanup path, unlink its socket, drop
+/// out of `main` — and then hang in the runtime's destructor forever.
+///
+/// That hang is what turned every `NEIGE_TIE_TO_PARENT=1` server restart into
+/// a leak: daemon alive, socket already removed, agent alive, session
+/// unreachable. Shutting the runtime down with a deadline is what makes a
+/// signalled exit actually exit.
+fn main() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(run());
+    rt.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+    result
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -370,11 +392,26 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
     // NEIGE_TIE_TO_PARENT=1 mode where the kernel sends SIGTERM on parent
     // death — without this handler the sock file would linger until cron
     // reaped it.
-    tokio::select! {
-        _ = shutdown_rx => tracing::info!("child exited, shutting down"),
+    let mut shutdown_rx = shutdown_rx;
+    let signalled = tokio::select! {
+        _ = &mut shutdown_rx => {
+            tracing::info!("child exited, shutting down");
+            false
+        }
         _ = wait_termination_signal() => {
             tracing::info!("received termination signal, shutting down");
+            true
         }
+    };
+
+    // Why: exiting on our own would reparent the shell — and the agent inside
+    // it — to init. That is the same orphan by a different route: an agent
+    // still running, still holding its memory, with nothing left that can
+    // reach it. A terminal that goes away hangs its session up; so do we.
+    if signalled {
+        signal_session(leader_pid, libc::SIGHUP);
+        let _ = tokio::time::timeout(HANGUP_GRACE, &mut shutdown_rx).await;
+        signal_session(leader_pid, libc::SIGKILL);
     }
 
     // Let in-flight clients flush the ChildExited frame before we close.
@@ -668,6 +705,53 @@ fn spawn_foreground_watcher(
 /// and the next sample corrects it.
 fn owns_prompt(fg: libc::pid_t, leader_pid: libc::pid_t) -> bool {
     fg == leader_pid || parent_pid(fg) == Some(leader_pid)
+}
+
+/// How long the session gets to unwind after the hangup before we stop asking
+/// nicely. Generous enough for an agent to flush its transcript, bounded so a
+/// process that ignores SIGHUP cannot keep the daemon — or the restart that
+/// signalled it — waiting.
+const HANGUP_GRACE: Duration = Duration::from_secs(3);
+
+/// Signal every process in the PTY session led by `leader_pid`.
+///
+/// Not `ChildKiller::kill`, and not a process-group signal: `kill` would
+/// SIGKILL `/bin/sh -c zsh` alone, and a job-controlling shell puts each job
+/// in a process group of its own, so the agent is never in the group we
+/// spawned. The session id is the one thing the shell, its jobs and the agent
+/// all share, and `portable_pty` made the child a session leader, so its pid
+/// is that id.
+fn signal_session(leader_pid: Option<u32>, sig: libc::c_int) {
+    let Some(leader) = leader_pid.map(|p| p as libc::pid_t) else {
+        tracing::warn!("no child pid; cannot hang up the session");
+        return;
+    };
+    for pid in session_members(leader) {
+        // SAFETY: kill(2) with a pid read from /proc a moment ago. A process
+        // that exited in between yields ESRCH, which is not a failure here.
+        unsafe { libc::kill(pid, sig) };
+    }
+}
+
+/// Pids whose session id is `leader`, itself included.
+fn session_members(leader: libc::pid_t) -> Vec<libc::pid_t> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<libc::pid_t>().ok())
+        .filter(|pid| session_id(*pid) == Some(leader))
+        .collect()
+}
+
+/// Session id from `/proc/<pid>/stat`. Fields after the parenthesised comm are
+/// state, ppid, pgrp, session — see [`parent_pid`] for why they are taken
+/// relative to the last `)`.
+fn session_id(pid: libc::pid_t) -> Option<libc::pid_t> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    after_comm.split_whitespace().nth(3)?.parse().ok()
 }
 
 /// Parent pid from `/proc/<pid>/stat`.
