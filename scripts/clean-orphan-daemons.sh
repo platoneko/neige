@@ -6,11 +6,27 @@
 #   - daemon has no alive claude descendant (daemon → sh -c zsh → zsh → claude)
 #   - OR its cmdline is empty / has no --id (broken)
 #
-# Any daemon with an alive claude is left untouched. Orphan sock files (no
-# daemon in ps references them) are removed unconditionally.
+# Any daemon with an alive claude is left untouched. Orphan sock files (nothing
+# is listening on them) are removed unconditionally.
 set -euo pipefail
 
 SOCK_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/neige"
+
+# Ask the kernel who we are rather than the environment. cron runs without
+# USER set, and `set -u` turned every `$USER` expansion below into a failing
+# command substitution — silently, because each was wrapped in `|| true`. The
+# daemon list came back empty, which made every socket look unreferenced, and
+# the nightly --go run deleted the sockets of healthy live sessions. Those
+# sessions stay up but can never be reattached, so the next server restart
+# abandons them with their agents still running.
+UID_NUM=$(id -u)
+
+# Without ss(8) we cannot tell a live socket from a stale one, and guessing
+# wrong costs a live session. Refuse instead.
+command -v ss >/dev/null || {
+  echo "ss(8) not found; refusing to classify sockets" >&2
+  exit 1
+}
 
 has_alive_claude() {
   local pid=$1
@@ -29,7 +45,7 @@ has_alive_claude() {
 
 KILL_PIDS=()
 KEEP_PIDS=()
-for pid in $(pgrep -u "$USER" -f 'neige-session-daemon ' 2>/dev/null || true); do
+for pid in $(pgrep -u "$UID_NUM" -f 'neige-session-daemon ' 2>/dev/null || true); do
   cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
   id=$(echo "$cmdline" | grep -oE -- '--id [a-f0-9-]+' | awk '{print $2}')
   if [ -z "$cmdline" ] || [ -z "$id" ]; then
@@ -43,15 +59,17 @@ for pid in $(pgrep -u "$USER" -f 'neige-session-daemon ' 2>/dev/null || true); d
   fi
 done
 
-# Referenced socks (those still owned by any daemon in ps)
-mapfile -t REFERENCED_SOCKS < <(
-  for p in $(pgrep -u "$USER" -f 'neige-session-daemon ' 2>/dev/null || true); do
-    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -oE -- '--sock [^ ]+' | awk '{print $2}'
-  done | sort -u
+# Sockets someone is actually listening on. This is the authoritative test and
+# it is deliberately not derived from the daemon list above: a socket that
+# accepts connections is in use no matter what process enumeration thinks, and
+# that independence is the point — deleting a live session's socket is
+# unrecoverable, while leaving a stale file costs nothing until the next run.
+mapfile -t LISTENING_SOCKS < <(
+  ss -xl 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ "^/") { print $i; break }}' | sort -u
 )
 is_referenced() {
   local s=$1 r
-  for r in "${REFERENCED_SOCKS[@]}"; do [ "$r" = "$s" ] && return 0; done
+  for r in "${LISTENING_SOCKS[@]}"; do [ "$r" = "$s" ] && return 0; done
   return 1
 }
 ORPHAN_SOCKS=()
