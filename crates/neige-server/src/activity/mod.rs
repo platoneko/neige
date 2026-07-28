@@ -13,10 +13,16 @@
 //! the agent being done, while any periodic repaint (a status line, a clock)
 //! read as it being busy.
 //!
-//! The projection is therefore timer-free. Every transition is caused by a
-//! lifecycle event, and a turn ends only when `Stop` says it ended.
+//! Every transition is therefore caused by a lifecycle event, with one
+//! exception the events themselves force: an interrupted turn fires no
+//! `Stop`, so a `Working` that has had neither a hook nor a byte of terminal
+//! output behind it for a minute is demoted when the state is read. See
+//! [`Activity::demote_if_stale`] — the only place a clock enters, and it can
+//! only ever lower a reading, never raise one.
 
 pub mod install;
+
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -144,6 +150,42 @@ impl Activity {
             (known, _) => known,
         }
     }
+
+    /// How long a `Working` session must go without any lifecycle event *and*
+    /// without any terminal output before we stop believing it.
+    ///
+    /// Sized against what a mid-turn agent emits rather than against how long
+    /// a turn runs: both TUIs repaint an elapsed-time counter about once a
+    /// second, so a full minute of silence is far outside anything a live turn
+    /// produces.
+    pub const STALE_WORKING: Duration = Duration::from_secs(60);
+
+    /// Give up on a `Working` that nothing is backing any more.
+    ///
+    /// A turn can end without a `Stop`: Claude Code and grok both skip the
+    /// stop hooks when the user interrupts (Esc / Ctrl+C), when a turn is
+    /// refused, and when it hits its max-turns cap. Last-event-wins then pins
+    /// the session at `Working` until whenever its next prompt happens to
+    /// arrive, which is what this undoes.
+    ///
+    /// Silence on its own is not evidence — inferring idle from it is the
+    /// byte-rate mistake this module exists to remove. It counts here only
+    /// alongside hook silence, and only in one direction: nothing in this
+    /// function may raise a session to `Working`.
+    ///
+    /// `output_age` is `None` when we have never seen this session's terminal
+    /// produce anything. Never having observed output is a different claim
+    /// from having watched it stop, so that case holds `Working`.
+    pub fn demote_if_stale(self, event_age: Duration, output_age: Option<Duration>) -> Activity {
+        let (Activity::Working, Some(output_age)) = (self, output_age) else {
+            return self;
+        };
+        if event_age >= Self::STALE_WORKING && output_age >= Self::STALE_WORKING {
+            Activity::AwaitingInput
+        } else {
+            self
+        }
+    }
 }
 
 /// Project a payload's event name onto an activity.
@@ -252,6 +294,62 @@ mod tests {
             activity_for_hook("SessionEnd").unwrap().resolve(Some(true)),
             Activity::Working
         );
+    }
+
+    /// Comfortably past `STALE_WORKING`, so the tests read as "long ago"
+    /// rather than as arithmetic against the constant.
+    const LONG_AGO: Duration = Duration::from_secs(600);
+    const JUST_NOW: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn an_interrupted_turn_stops_being_reported_as_working() {
+        // Esc mid-turn fires no `Stop`, so nothing else will ever move this
+        // session off `Working`.
+        assert_eq!(
+            Activity::Working.demote_if_stale(LONG_AGO, Some(LONG_AGO)),
+            Activity::AwaitingInput
+        );
+    }
+
+    #[test]
+    fn a_turn_still_repainting_its_spinner_is_left_alone() {
+        // The long-tool-call case: no hook between PreToolUse and PostToolUse,
+        // but the TUI is still drawing, so the turn is alive.
+        assert_eq!(
+            Activity::Working.demote_if_stale(LONG_AGO, Some(JUST_NOW)),
+            Activity::Working
+        );
+        // And the mirror image — hooks arriving keeps it alive through a
+        // quiet stretch of terminal.
+        assert_eq!(
+            Activity::Working.demote_if_stale(JUST_NOW, Some(LONG_AGO)),
+            Activity::Working
+        );
+    }
+
+    #[test]
+    fn never_having_seen_output_is_not_the_same_as_output_stopping() {
+        assert_eq!(
+            Activity::Working.demote_if_stale(LONG_AGO, None),
+            Activity::Working
+        );
+    }
+
+    #[test]
+    fn staleness_can_only_lower_a_reading() {
+        // Otherwise silence would once again mean "idle", which is the
+        // heuristic this module replaced.
+        for state in [Activity::Unknown, Activity::Idle, Activity::AwaitingInput] {
+            assert_eq!(state.demote_if_stale(LONG_AGO, Some(LONG_AGO)), state);
+        }
+    }
+
+    #[test]
+    fn a_demoted_turn_outranks_the_foreground_group() {
+        // The claude process is still in the terminal's foreground group after
+        // an interrupt, so the fallback would say `Working` all over again.
+        let demoted = Activity::Working.demote_if_stale(LONG_AGO, Some(LONG_AGO));
+        assert_eq!(demoted.resolve(Some(true)), Activity::AwaitingInput);
     }
 
     #[test]

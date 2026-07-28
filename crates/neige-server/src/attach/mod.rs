@@ -12,6 +12,7 @@ pub mod daemon;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc};
@@ -131,6 +132,12 @@ pub struct SessionClient {
     /// one — an older daemon never will, and this stays `None` forever,
     /// which reads as "no opinion" rather than "idle".
     foreground_running: Arc<Mutex<Option<bool>>>,
+    /// When the reader last saw the session's PTY produce anything. `None`
+    /// until the first live byte: the replay we seed history with at connect
+    /// time describes the past, not whether the session is emitting now.
+    /// `crate::activity::Activity::demote_if_stale` relies on that
+    /// distinction.
+    last_output_at: Arc<Mutex<Option<Instant>>>,
     #[allow(dead_code)]
     sock_path: PathBuf,
 }
@@ -162,6 +169,7 @@ impl SessionClient {
         let (tx, _) = broadcast::channel::<(u64, Vec<u8>)>(256);
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let foreground_running = Arc::new(Mutex::new(None));
+        let last_output_at = Arc::new(Mutex::new(None));
 
         // Seed history with the replay so a WS client that attaches after us
         // can be primed from Snapshot (not wait for the first live byte).
@@ -178,6 +186,7 @@ impl SessionClient {
         let tx_r = tx.clone();
         let alive_r = alive.clone();
         let foreground_r = foreground_running.clone();
+        let last_output_r = last_output_at.clone();
         tokio::spawn(async move {
             let mut rd = rd;
             loop {
@@ -187,6 +196,9 @@ impl SessionClient {
                 };
                 match msg {
                     DaemonMsg::Stdout(bytes) => {
+                        if let Ok(mut t) = last_output_r.lock() {
+                            *t = Some(Instant::now());
+                        }
                         if let Ok(mut h) = history_r.lock() {
                             let seq = h.append(bytes.clone());
                             let _ = tx_r.send((seq, bytes));
@@ -234,6 +246,7 @@ impl SessionClient {
             attach_id: Uuid::new_v4(),
             alive,
             foreground_running,
+            last_output_at,
             sock_path,
         })
     }
@@ -264,6 +277,16 @@ impl SessionClient {
     /// never does.
     pub fn foreground_running(&self) -> Option<bool> {
         self.foreground_running.lock().ok().and_then(|f| *f)
+    }
+
+    /// How long since the session's PTY last produced output, or `None` if we
+    /// have not seen any since attaching.
+    pub fn since_last_output(&self) -> Option<Duration> {
+        self.last_output_at
+            .lock()
+            .ok()
+            .and_then(|t| *t)
+            .map(|t| t.elapsed())
     }
 
     /// Atomically subscribe to live output and prepare the catch-up payload

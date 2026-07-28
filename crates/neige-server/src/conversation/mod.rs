@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -185,6 +186,11 @@ pub struct Conversation {
     /// Not persisted — a session reloaded from disk starts at `Unknown` and
     /// re-populates on the first hook its agent fires.
     pub activity: Activity,
+    /// When `activity` was last written. Paired with it, and only ever read
+    /// to answer "has anything backed this `Working` lately?" — see
+    /// [`Activity::demote_if_stale`]. Write the two together, through
+    /// [`ConversationManager::set_activity`].
+    activity_set_at: Instant,
 }
 
 impl Conversation {
@@ -206,6 +212,17 @@ impl Conversation {
         } else {
             self.cwd.clone()
         };
+        // Agent level first: drop a `Working` that no hook and no byte of
+        // output has backed for a minute. Only then does the shell-level
+        // signal get to answer for the sessions hooks say nothing about.
+        let terminal = self.client.as_ref();
+        let activity = self
+            .activity
+            .demote_if_stale(
+                self.activity_set_at.elapsed(),
+                terminal.and_then(|c| c.since_last_output()),
+            )
+            .resolve(terminal.and_then(|c| c.foreground_running()));
         ConvInfo {
             id: self.id,
             title: self.title.clone(),
@@ -217,9 +234,7 @@ impl Conversation {
             use_worktree: self.use_worktree,
             worktree_branch: self.worktree_branch.clone(),
             parent_id: self.parent_id,
-            activity: self
-                .activity
-                .resolve(self.client.as_ref().and_then(|c| c.foreground_running())),
+            activity,
             mode: self.mode.clone(),
         }
     }
@@ -964,6 +979,7 @@ impl ConversationManager {
                 client: None, // detached
                 chat_client: None,
                 activity: Activity::Unknown,
+                activity_set_at: Instant::now(),
             };
             self.convs.insert(conv.id, conv);
         }
@@ -1102,6 +1118,7 @@ impl ConversationManager {
             client,
             chat_client,
             activity: Activity::Unknown,
+            activity_set_at: Instant::now(),
         };
 
         let info = conv.info();
@@ -1194,7 +1211,9 @@ impl ConversationManager {
 
     /// Record what the agent in `id` is doing. Last event wins: every
     /// transition is caused by a lifecycle hook, so the most recent one is by
-    /// definition the current truth — there is no timer racing it.
+    /// definition the current truth. The stamp taken alongside it is not a
+    /// timer racing that truth — it only lets a read notice a `Working` whose
+    /// turn ended without firing anything.
     ///
     /// Returns `false` for an unknown id, which is normal rather than an
     /// error: a hook can arrive from a claude the user launched by hand
@@ -1203,6 +1222,7 @@ impl ConversationManager {
         match self.convs.get_mut(id) {
             Some(conv) => {
                 conv.activity = activity;
+                conv.activity_set_at = Instant::now();
                 true
             }
             None => false,
@@ -1807,6 +1827,7 @@ mod tests {
             client: None,
             chat_client: None,
             activity: Activity::Unknown,
+            activity_set_at: Instant::now(),
         }
     }
 
