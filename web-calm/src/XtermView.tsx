@@ -44,7 +44,7 @@ interface XtermViewProps {
 /**
  * Renders a live PTY inside a card body. Wraps `useTerminalCore` from
  * `@neige/shared` — the same protocol web/ and web-mobile/ use — so reconnect,
- * resize, scrollback and busy detection all behave identically.
+ * resize and scrollback all behave identically.
  */
 export function XtermView({ convId, theme = 'light' }: XtermViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);

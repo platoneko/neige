@@ -1,12 +1,11 @@
 import { useCallback, useRef, useState } from 'react';
 import { Folder, MessageSquare, Terminal as TerminalIcon } from 'lucide-react';
-import { Button } from '@neige/shared';
+import { Button, activityClass } from '@neige/shared';
 import type { ConvInfo } from '../types';
 import type { OpenFile, TaskGroup } from '../tasks';
 import { PortForwardPanel } from './PortForwardPanel';
 import type { PortForward } from './PortForwardPanel';
 import { TaskTree } from './TaskTree';
-import { useBusyTerminalIds } from '../hooks/terminalBusy';
 
 export type { PortForward };
 
@@ -59,7 +58,6 @@ export function Sidebar({
   const [collapsed, setCollapsed] = useState(false);
   const dragging = useRef(false);
   const widthBeforeCollapse = useRef(DEFAULT_WIDTH);
-  const busyIds = useBusyTerminalIds();
 
   const toggleCollapse = useCallback(() => {
     setCollapsed((prev) => {
@@ -151,7 +149,7 @@ export function Sidebar({
               return (
                 <button
                   key={c.id}
-                  className={`conv-dot-btn ${activeTab === c.id ? 'active' : ''} ${busyIds.has(c.id) ? 'busy' : ''}`}
+                  className={`conv-dot-btn ${activeTab === c.id ? 'active' : ''} ${activityClass(c.activity)}`}
                   onClick={() => onSelect(c.id)}
                   title={c.title}
                   aria-label={c.title}
@@ -220,7 +218,6 @@ export function Sidebar({
               openFiles={openFiles}
               onSelectFile={onSelectFile}
               onCloseFile={onCloseFile}
-              busyIds={busyIds}
               onSelect={onSelect}
               onDelete={onDelete}
               onRename={onRename}

@@ -76,6 +76,14 @@ pub enum DaemonMsg {
     ChatEvent { json: String },
     /// The child program exited. Daemon will shut down right after this.
     ChildExited { code: Option<i32> },
+    /// Terminal mode only: whether the child has handed the terminal to a
+    /// foreground command (`true`) or is sitting at its own prompt
+    /// (`false`). Sent on change, not on a schedule.
+    ///
+    /// Appended last on purpose — bincode encodes variants by index, so a
+    /// daemon left over from an older build simply never sends this and
+    /// every existing frame keeps its index.
+    Foreground { running: bool },
 }
 
 fn bincode_config() -> bincode::config::Configuration {

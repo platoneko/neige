@@ -1,16 +1,20 @@
 import { useSyncExternalStore } from 'react'
 
 /**
- * Per-card activity tracking: counts "completed bursts" (sustained output
- * ending in a period of silence) that arrive while the card is not being
- * viewed. For Claude specifically this is a decent proxy for "a new message
- * just finished arriving". Reset to 0 when the user activates the card.
+ * Unread-burst counter: counts "completed bursts" (sustained output ending in
+ * a period of silence) that arrive while the card is not being viewed. For
+ * Claude specifically this is a decent proxy for "a new message just finished
+ * arriving". Reset to 0 when the user activates the card.
  *
  * Terminal has no native message concept, so we approximate:
- *   - Output chunk arrives → mark busy, reset idle timer
+ *   - Output chunk arrives → reset the idle timer
  *   - No output for BURST_IDLE_MS → burst ended
  *     - If card was NOT the active view → increment completed count
  *     - Else → silent (user is already watching)
+ *
+ * This deliberately still watches output volume, because "something was
+ * printed since you last looked" IS a statement about output. Whether the
+ * agent is busy is a different question, answered by `ConvInfo.activity`.
  */
 
 const BURST_IDLE_MS = 2000
@@ -18,13 +22,11 @@ const BURST_IDLE_MS = 2000
 export interface CardActivity {
   lastOutputAt: number
   completedBursts: number
-  busy: boolean
 }
 
 const EMPTY: CardActivity = {
   lastOutputAt: 0,
   completedBursts: 0,
-  busy: false,
 }
 
 type Listener = () => void
@@ -57,7 +59,7 @@ export const cardActivity = {
   /** Called by useTerminal on every PTY output chunk. */
   onOutput(id: string) {
     const curr = get(id)
-    set(id, { ...curr, lastOutputAt: Date.now(), busy: true })
+    set(id, { ...curr, lastOutputAt: Date.now() })
 
     const existing = burstTimers.get(id)
     if (existing) clearTimeout(existing)
@@ -67,7 +69,6 @@ export const cardActivity = {
       const bumpCount = activeId !== id
       set(id, {
         ...a,
-        busy: false,
         completedBursts: a.completedBursts + (bumpCount ? 1 : 0),
       })
       burstTimers.delete(id)

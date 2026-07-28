@@ -15,6 +15,7 @@ mod chat_ws;
 mod config;
 mod conversations;
 mod fs;
+mod hooks;
 mod proxy;
 mod util;
 mod ws;
@@ -71,6 +72,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/config", post(config::save_config))
         .route("/api/layout", get(config::get_layout))
         .route("/api/layout", post(config::save_layout))
+        .route("/api/hooks/{id}", post(hooks::ingest_hook))
         .route("/api/proxy", get(proxy::proxy_request))
         .route("/ws/{id}", get(ws::ws_handler))
         .route("/ws/{id}/chat", get(chat_ws::chat_ws_handler))

@@ -23,6 +23,19 @@ interface ConvInfoBase {
   /** Free-form display label (sidebar / tab). Not unique. */
   title: string;
   status: 'running' | 'detached' | 'dead';
+  /**
+   * What the agent (or shell) in this session is doing, as opposed to
+   * `status`, which is about the session's process being alive.
+   *
+   * Server-derived: Claude Code lifecycle hooks when an agent is loaded,
+   * otherwise the terminal's foreground process group. Both are facts
+   * reported by the thing being observed — the client does not infer this
+   * and must not try to.
+   *
+   * `unknown` means no signal, e.g. a detached session or a daemon too old
+   * to report one. Render it as "no opinion", never as idle.
+   */
+  activity: 'unknown' | 'idle' | 'working' | 'awaiting_input';
   program: string;
   cwd: string;
   /** Actual working directory (worktree path if applicable) */

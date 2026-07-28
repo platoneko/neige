@@ -785,15 +785,9 @@
   overflow: hidden;
 }
 
-.terminal-busy-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  z-index: 5;
-  pointer-events: none;
-  transition: opacity 0.3s ease;
-}
-
+/* Working: recede. The agent is fine and doesn't need you. Everything else
+   (idle / awaiting_input / unknown) stays at full opacity — awaiting_input
+   earns attention by not dimming, standing out against dimmed siblings. */
 .conv-item.busy,
 .conv-dot-btn.busy {
   opacity: 0.45;

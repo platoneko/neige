@@ -1196,6 +1196,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "neige-hook"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+]
+
+[[package]]
 name = "neige-server"
 version = "0.1.0"
 dependencies = [
@@ -1576,6 +1583,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

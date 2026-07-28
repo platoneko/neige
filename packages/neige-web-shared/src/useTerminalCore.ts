@@ -34,8 +34,6 @@ export interface UseTerminalCoreOptions {
   scrollback?: number;
   /** Fires on every PTY output chunk, with the sessionId + payload byte count. */
   onActivity?: (sessionId: string, byteCount: number) => void;
-  /** Called when sustained-output busy state flips. */
-  onBusyChange?: (busy: boolean) => void;
   /** WebSocket lifecycle status. */
   onStatusChange?: (status: TerminalStatus) => void;
   /** Called once the xterm Terminal is ready (after open()). */
@@ -58,16 +56,13 @@ export interface UseTerminalCoreApi {
   scheduleFit: () => void;
 }
 
-const BUSY_ACTIVATE_MS = 2000; // sustained output for 2s → busy
-const BUSY_DEACTIVATE_MS = 1000; // 1s of silence → clear busy
-const BYTES_PER_SECOND_THRESHOLD = 500;
 const MAX_RECONNECT_DELAY = 10000;
 
 /**
  * Creates an xterm Terminal bound to a ref, connects it to `/ws/<sessionId>`
  * with the framed attach protocol, and manages reconnect + resize + activity
  * tracking. Each frontend wraps this to layer on its own concerns (theme,
- * busy store, keyboard shortcuts, viewport quirks).
+ * keyboard shortcuts, viewport quirks).
  */
 export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreApi {
   const {
@@ -78,7 +73,6 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     fontSize,
     scrollback = 10000,
     onActivity,
-    onBusyChange,
     onStatusChange,
     onTerminalReady,
     xtermOptions,
@@ -94,15 +88,13 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
   // Keep callbacks fresh across renders without retriggering the whole
   // connect/teardown effect on every function identity change.
   const onActivityRef = useRef(onActivity);
-  const onBusyChangeRef = useRef(onBusyChange);
   const onStatusChangeRef = useRef(onStatusChange);
   const onTerminalReadyRef = useRef(onTerminalReady);
   useEffect(() => {
     onActivityRef.current = onActivity;
-    onBusyChangeRef.current = onBusyChange;
     onStatusChangeRef.current = onStatusChange;
     onTerminalReadyRef.current = onTerminalReady;
-  }, [onActivity, onBusyChange, onStatusChange, onTerminalReady]);
+  }, [onActivity, onStatusChange, onTerminalReady]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -175,42 +167,20 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     };
     scheduleFitRef.current = scheduleFit;
 
-    // --- Activity / busy tracking ---
-    // Go busy: sustained substantial output (500+ bytes/s for 2s).
-    // Clear busy: 1s of silence (fast recovery).
-    let bytesInWindow = 0;
-    let windowStart = 0;
-    let lastOutputTime = 0;
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    let currentBusy = false;
-
-    const setBusy = (busy: boolean) => {
-      if (busy === currentBusy) return;
-      currentBusy = busy;
-      onBusyChangeRef.current?.(busy);
-    };
-
+    // --- Activity ---
+    // Output volume used to drive a busy/idle indicator here: 500 B/s for 2s
+    // meant "busy", a second of silence meant "idle". That measured whether
+    // the TUI was repainting, not whether the agent was doing anything — a
+    // long think or a quiet build read as idle, a status line with a clock
+    // read as busy, and the multi-megabyte replay frame on every reconnect
+    // poisoned the running average into a busy state that stuck.
+    //
+    // Session activity is now reported by the server (ConvInfo.activity),
+    // sourced from Claude Code lifecycle hooks and the PTY's foreground
+    // process group. `onActivity` survives only as a raw output notification
+    // for callers that want it; it carries no interpretation.
     const trackOutput = (byteCount: number) => {
       onActivityRef.current?.(sessionId, byteCount);
-      const now = Date.now();
-      if (now - lastOutputTime > 1000) {
-        bytesInWindow = 0;
-        windowStart = now;
-      }
-      lastOutputTime = now;
-      bytesInWindow += byteCount;
-      const elapsed = now - windowStart;
-      if (
-        elapsed >= BUSY_ACTIVATE_MS &&
-        bytesInWindow >= BYTES_PER_SECOND_THRESHOLD * (elapsed / 1000)
-      ) {
-        setBusy(true);
-      }
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        setBusy(false);
-        bytesInWindow = 0;
-      }, BUSY_DEACTIVATE_MS);
     };
 
     // Batch incoming PTY output per animation frame to avoid cursor jitter
@@ -377,7 +347,6 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     return () => {
       disposed = true;
       if (resizeTimer) clearTimeout(resizeTimer);
-      if (idleTimer) clearTimeout(idleTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener('resize', scheduleFit);
@@ -391,8 +360,6 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       wsRef.current = null;
       fitRef.current = null;
       scheduleFitRef.current = () => {};
-      // Let the caller clear any external busy state on teardown.
-      if (currentBusy) onBusyChangeRef.current?.(false);
     };
   }, [
     sessionId,

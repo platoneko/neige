@@ -188,7 +188,7 @@ function OverviewCard({
             />
             <ModeIcon mode={conv.mode} />
             <Text size="3" weight="medium" truncate>{conv.title}</Text>
-            {activity.busy && (
+            {conv.activity === 'working' && (
               <span
                 title="working…"
                 style={{
@@ -199,6 +199,21 @@ function OverviewCard({
                   background: 'var(--green-9)',
                   marginLeft: 2,
                   animation: 'pulse-green 1.4s ease-in-out infinite',
+                }}
+              />
+            )}
+            {/* Steady, not pulsing: this one isn't going to resolve on its
+                own, so it shouldn't read as activity in progress. */}
+            {conv.activity === 'awaiting_input' && (
+              <span
+                title="waiting for you"
+                style={{
+                  display: 'inline-block',
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: 'var(--yellow)',
+                  marginLeft: 2,
                 }}
               />
             )}
