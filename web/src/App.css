@@ -785,20 +785,13 @@
   overflow: hidden;
 }
 
-/* Working: recede. The agent is fine and doesn't need you. */
+/* Working: recede. The agent is fine and doesn't need you. Everything else
+   (idle / awaiting_input / unknown) stays at full opacity — awaiting_input
+   earns attention by not dimming, standing out against dimmed siblings. */
 .conv-item.busy,
 .conv-dot-btn.busy {
   opacity: 0.45;
   transition: opacity 0.3s ease;
-}
-
-/* Blocked on the user: the one state worth interrupting them for. Marked
-   rather than dimmed, so it reads against a row of working siblings. */
-.conv-item.awaiting,
-.conv-dot-btn.awaiting {
-  opacity: 1;
-  box-shadow: inset 2px 0 0 var(--yellow);
-  transition: box-shadow 0.3s ease;
 }
 
 /* ===== Empty State ===== */

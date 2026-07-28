@@ -30,17 +30,11 @@ export function rollUpActivity(members: readonly ConvInfo[]): Activity {
 }
 
 /**
- * Modifier class for a row or dot. `unknown` and `idle` get nothing: the
- * resting appearance is correct for both, and styling "no signal" differently
- * from "idle" would imply a distinction the user can't act on.
+ * Modifier class for a row or dot. Only `working` gets marked — it dims so the
+ * agent recedes. Everything else (idle / awaiting_input / unknown) keeps the
+ * resting appearance; awaiting_input earns attention by refusing to dim,
+ * standing out against a row of dimmed working siblings.
  */
 export function activityClass(activity: Activity): string {
-  switch (activity) {
-    case 'working':
-      return 'busy';
-    case 'awaiting_input':
-      return 'awaiting';
-    default:
-      return '';
-  }
+  return activity === 'working' ? 'busy' : '';
 }
