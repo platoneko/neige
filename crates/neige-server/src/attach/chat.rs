@@ -165,9 +165,13 @@ impl ChatSessionClient {
                         break;
                     }
                     // Frames we don't expect in chat mode — ignore quietly.
+                    // `Foreground` is terminal-only: a chat session has no
+                    // PTY whose foreground group could be read, and its
+                    // activity comes from the runner's own turn events.
                     DaemonMsg::Hello { .. }
                     | DaemonMsg::HelloChat { .. }
-                    | DaemonMsg::Stdout(_) => {}
+                    | DaemonMsg::Stdout(_)
+                    | DaemonMsg::Foreground { .. } => {}
                 }
             }
             alive_r.store(false, std::sync::atomic::Ordering::Relaxed);

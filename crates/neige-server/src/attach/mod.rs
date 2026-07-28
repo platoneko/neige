@@ -126,6 +126,11 @@ pub struct SessionClient {
     /// Flipped to false by the reader task when the daemon socket closes
     /// (child exit / daemon crash).
     alive: Arc<std::sync::atomic::AtomicBool>,
+    /// Latest `DaemonMsg::Foreground`: whether the session's program has
+    /// handed the terminal to a command. `None` until the daemon reports
+    /// one — an older daemon never will, and this stays `None` forever,
+    /// which reads as "no opinion" rather than "idle".
+    foreground_running: Arc<Mutex<Option<bool>>>,
     #[allow(dead_code)]
     sock_path: PathBuf,
 }
@@ -156,6 +161,7 @@ impl SessionClient {
         let history = Arc::new(Mutex::new(History::new(HISTORY_MAX_BYTES)));
         let (tx, _) = broadcast::channel::<(u64, Vec<u8>)>(256);
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let foreground_running = Arc::new(Mutex::new(None));
 
         // Seed history with the replay so a WS client that attaches after us
         // can be primed from Snapshot (not wait for the first live byte).
@@ -171,6 +177,7 @@ impl SessionClient {
         let history_r = history.clone();
         let tx_r = tx.clone();
         let alive_r = alive.clone();
+        let foreground_r = foreground_running.clone();
         tokio::spawn(async move {
             let mut rd = rd;
             loop {
@@ -188,6 +195,11 @@ impl SessionClient {
                     DaemonMsg::ChildExited { code } => {
                         tracing::info!(?code, "daemon reported child exit");
                         break;
+                    }
+                    DaemonMsg::Foreground { running } => {
+                        if let Ok(mut f) = foreground_r.lock() {
+                            *f = Some(running);
+                        }
                     }
                     // A second Hello would only arrive if we re-attached;
                     // we don't, so treat as noise. Chat-mode frames must
@@ -221,6 +233,7 @@ impl SessionClient {
             history,
             attach_id: Uuid::new_v4(),
             alive,
+            foreground_running,
             sock_path,
         })
     }
@@ -244,6 +257,13 @@ impl SessionClient {
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the session's program currently has a command in the
+    /// foreground. `None` when the daemon hasn't reported — an older daemon
+    /// never does.
+    pub fn foreground_running(&self) -> Option<bool> {
+        self.foreground_running.lock().ok().and_then(|f| *f)
     }
 
     /// Atomically subscribe to live output and prepare the catch-up payload

@@ -143,6 +143,7 @@ struct Cli {
 enum Event {
     Output(Vec<u8>),
     Exit(Option<i32>),
+    Foreground { running: bool },
 }
 
 /// Events fanned out in chat mode. Each `Event` here is one already-
@@ -230,6 +231,11 @@ impl EventBuffer {
 type SharedBuffer = Arc<Mutex<ByteBuffer>>;
 type SharedEventBuffer = Arc<Mutex<EventBuffer>>;
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
+
+/// Latest foreground state, so a client that attaches between changes learns
+/// it immediately instead of waiting for the next one. `None` until the first
+/// sample lands.
+type SharedForeground = Arc<Mutex<Option<bool>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -323,9 +329,23 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
     let writer = master.lock().unwrap().take_writer()?;
     spawn_pty_writer(writer, stdin_rx);
 
+    // ---- Foreground-command watcher ----
+    // Read the pid before the child moves into the waiter task below.
+    let leader_pid = child.process_id();
+
     // ---- Child-exit watcher ----
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     spawn_child_waiter(child, event_tx.clone(), shutdown_tx);
+
+    let foreground: SharedForeground = Arc::new(Mutex::new(None));
+    match leader_pid {
+        Some(pid) => {
+            spawn_foreground_watcher(master.clone(), pid, event_tx.clone(), foreground.clone())
+        }
+        // Without a pid there is nothing to compare the foreground group
+        // against. Clients fall back to having no opinion for this session.
+        None => tracing::warn!("no child pid; foreground tracking disabled"),
+    }
 
     // ---- Socket ----
     let listener = bind_socket(&cli.sock)?;
@@ -342,6 +362,7 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
         master.clone(),
         stdin_tx.clone(),
         killer.clone(),
+        foreground.clone(),
     ));
 
     // Why: race child-exit against SIGTERM/SIGINT so a signal-terminated
@@ -578,6 +599,89 @@ fn spawn_pty_writer(
     });
 }
 
+/// How often to sample the terminal's foreground process group. The consumer
+/// is a status indicator, so half a second of lag is invisible, and sampling
+/// is a single `ioctl` on an otherwise idle session.
+const FOREGROUND_POLL: Duration = Duration::from_millis(500);
+
+/// Report whether the session's shell has handed the terminal to a command.
+///
+/// `tcgetpgrp` on the master side names the process group currently entitled
+/// to read from the terminal. Deciding what that means takes one more step,
+/// because sessions are spawned as `/bin/sh -c <program>` and dash does not
+/// reliably exec: for `zsh -f` it forks, so the interactive shell that ends up
+/// owning the terminal is a *child* of the pid we recorded, in a process group
+/// of its own. Comparing the foreground group against our pid alone therefore
+/// reads "a command is running" for the entire life of every session.
+///
+/// So the terminal is at a prompt when it belongs either to the process we
+/// spawned (dash exec'd) or to that process's direct child (dash forked, and
+/// the shell took over). Anything deeper is something the shell launched.
+///
+/// This is a kernel fact, not an inference from how much the program printed —
+/// which is the whole reason it exists. A build that emits nothing for a minute
+/// and a shell sitting idle produce identical output; they are never confusable
+/// here.
+///
+/// Limitation: the distinction needs job control, so it only means anything
+/// for an interactive shell. A session whose program is a single
+/// non-interactive command (`zsh -c 'npm run dev'`, or anything else that
+/// never forks into a separate process group) keeps the terminal in one group
+/// for its whole life and therefore always reads as being at a prompt. Those
+/// sessions have no prompt to return to, so there is no better answer to give;
+/// they just don't benefit from this signal.
+fn spawn_foreground_watcher(
+    master: SharedMaster,
+    leader_pid: u32,
+    event_tx: broadcast::Sender<Event>,
+    latest: SharedForeground,
+) {
+    tokio::spawn(async move {
+        let mut last: Option<bool> = None;
+        loop {
+            tokio::time::sleep(FOREGROUND_POLL).await;
+            // `None` means the terminal has no foreground group to name —
+            // the child is gone, or the fd is being torn down. Report
+            // nothing rather than guess; `Event::Exit` covers the real end.
+            let Some(fg) = master.lock().unwrap().process_group_leader() else {
+                continue;
+            };
+            let running = !owns_prompt(fg, leader_pid as libc::pid_t);
+            if last != Some(running) {
+                last = Some(running);
+                // Record before broadcasting: a client attaching right now
+                // reads `latest` to learn the state it was too late to see
+                // as an event.
+                *latest.lock().unwrap() = Some(running);
+                let _ = event_tx.send(Event::Foreground { running });
+            }
+        }
+    });
+}
+
+/// Whether the foreground process group `fg` is the session's own shell
+/// rather than something the shell launched. See [`spawn_foreground_watcher`]
+/// for why "direct child" is part of the answer.
+///
+/// An unreadable `/proc` entry means the process died between the `tcgetpgrp`
+/// and the lookup; treating that as "not the prompt" is the honest reading,
+/// and the next sample corrects it.
+fn owns_prompt(fg: libc::pid_t, leader_pid: libc::pid_t) -> bool {
+    fg == leader_pid || parent_pid(fg) == Some(leader_pid)
+}
+
+/// Parent pid from `/proc/<pid>/stat`.
+///
+/// The comm field is parenthesized and may itself contain spaces or parens,
+/// so the fields are taken relative to the LAST `)` rather than by splitting
+/// the whole line.
+fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    // Fields after comm: state, ppid, …
+    after_comm.split_whitespace().nth(1)?.parse().ok()
+}
+
 fn spawn_child_waiter(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     event_tx: broadcast::Sender<Event>,
@@ -673,6 +777,7 @@ async fn accept_loop(
     master: SharedMaster,
     stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
     killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    foreground: SharedForeground,
 ) {
     loop {
         match listener.accept().await {
@@ -682,9 +787,11 @@ async fn accept_loop(
                 let master = master.clone();
                 let stdin_tx = stdin_tx.clone();
                 let killer = killer.clone();
+                let foreground = foreground.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_client(sock, event_rx, buffer, master, stdin_tx, killer).await
+                        handle_client(sock, event_rx, buffer, master, stdin_tx, killer, foreground)
+                            .await
                     {
                         tracing::debug!(error = %e, "client ended");
                     }
@@ -731,6 +838,7 @@ async fn handle_client(
     master: SharedMaster,
     stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
     killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    foreground: SharedForeground,
 ) -> anyhow::Result<()> {
     let (mut rd, mut wr) = sock.into_split();
 
@@ -753,6 +861,17 @@ async fn handle_client(
     };
     write_frame(&mut wr, &DaemonMsg::Hello { replay }).await?;
 
+    // Foreground state changes rarely, so a client attaching between changes
+    // would otherwise sit with no reading until the next one — which for an
+    // hour-long build is the whole time it mattered. Prime it from the last
+    // sample. Skipped while `None`: nothing has been measured yet.
+    // Read out of the mutex before awaiting — holding the guard across the
+    // write would make this future non-Send.
+    let primed = *foreground.lock().unwrap();
+    if let Some(running) = primed {
+        write_frame(&mut wr, &DaemonMsg::Foreground { running }).await?;
+    }
+
     // Fan out events to this client.
     let down_task = tokio::spawn(async move {
         loop {
@@ -765,6 +884,14 @@ async fn handle_client(
                 Ok(Event::Exit(code)) => {
                     let _ = write_frame(&mut wr, &DaemonMsg::ChildExited { code }).await;
                     break;
+                }
+                Ok(Event::Foreground { running }) => {
+                    if write_frame(&mut wr, &DaemonMsg::Foreground { running })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 // Slow client — skip dropped frames rather than tear down.
                 Err(broadcast::error::RecvError::Lagged(n)) => {

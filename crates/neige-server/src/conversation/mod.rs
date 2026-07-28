@@ -1,3 +1,4 @@
+use crate::activity::Activity;
 use crate::attach::SessionClient;
 use crate::attach::chat::ChatSessionClient;
 use crate::attach::daemon;
@@ -157,6 +158,9 @@ pub struct ConvInfo {
     /// `parent_id_always_serialized_for_roots` locks this.
     #[serde(default)]
     pub parent_id: Option<Uuid>,
+    /// What the agent in this session is doing, as opposed to `status`, which
+    /// says whether the session's process is alive.
+    pub activity: Activity,
     #[serde(flatten)]
     pub mode: SessionMode,
 }
@@ -177,6 +181,10 @@ pub struct Conversation {
     pub mode: SessionMode,
     pub client: Option<SessionClient>,
     pub chat_client: Option<ChatSessionClient>,
+    /// Projected from Claude Code lifecycle hooks; see [`crate::activity`].
+    /// Not persisted — a session reloaded from disk starts at `Unknown` and
+    /// re-populates on the first hook its agent fires.
+    pub activity: Activity,
 }
 
 impl Conversation {
@@ -209,6 +217,9 @@ impl Conversation {
             use_worktree: self.use_worktree,
             worktree_branch: self.worktree_branch.clone(),
             parent_id: self.parent_id,
+            activity: self
+                .activity
+                .resolve(self.client.as_ref().and_then(|c| c.foreground_running())),
             mode: self.mode.clone(),
         }
     }
@@ -402,6 +413,36 @@ fn proxy_env(proxy: Option<&str>) -> Vec<(String, String)> {
             ("https_proxy".to_string(), p.to_string()),
         ]);
     }
+    env
+}
+
+/// The environment every session's process starts with.
+///
+/// `NEIGE_SESSION_ID` is the load-bearing addition. It is inherited by
+/// everything the user launches inside the session, so a `claude` typed by
+/// hand at the shell prompt reports its lifecycle hooks back against the
+/// right session — not just the ones neige spawns itself. The hook shim
+/// no-ops when the variable is absent, which is what keeps a claude started
+/// outside neige silent.
+///
+/// Gated on the same `disabled` kill-switch as MCP injection: a session the
+/// user deliberately sandboxed from the orchestrator shouldn't report to it
+/// either.
+fn session_env(
+    id: &Uuid,
+    proxy: Option<&str>,
+    inject: Option<&McpInjectConfig>,
+) -> Vec<(String, String)> {
+    let mut env = proxy_env(proxy);
+    let Some(cfg) = inject.filter(|c| !c.disabled) else {
+        return env;
+    };
+    env.push(("NEIGE_SESSION_ID".to_string(), id.to_string()));
+    env.push(("NEIGE_SERVER_URL".to_string(), cfg.base_url.clone()));
+    env.push((
+        "NEIGE_HOOK_TOKEN".to_string(),
+        cfg.internal_token.as_ref().clone(),
+    ));
     env
 }
 
@@ -922,6 +963,7 @@ impl ConversationManager {
                 mode: meta.mode,
                 client: None, // detached
                 chat_client: None,
+                activity: Activity::Unknown,
             };
             self.convs.insert(conv.id, conv);
         }
@@ -972,7 +1014,7 @@ impl ConversationManager {
 
         let is_git = is_git_repo(&cwd);
         let use_worktree = req.use_worktree && is_git;
-        let env = proxy_env(req.proxy.as_deref());
+        let env = session_env(&id, req.proxy.as_deref(), self.mcp_inject.as_ref());
 
         // Validate chat name up front: must be non-empty (uniqueness check
         // happens in commit 2 once the manager carries a name index).
@@ -1059,6 +1101,7 @@ impl ConversationManager {
             mode: req.mode,
             client,
             chat_client,
+            activity: Activity::Unknown,
         };
 
         let info = conv.info();
@@ -1083,7 +1126,7 @@ impl ConversationManager {
                 }
 
                 let command = build_resume_command(&conv.program, &conv.id);
-                let env = proxy_env(conv.proxy.as_deref());
+                let env = session_env(&conv.id, conv.proxy.as_deref(), self.mcp_inject.as_ref());
 
                 // For worktree sessions, find the actual worktree path where
                 // Claude CLI stored the conversation data; fall back to the
@@ -1129,7 +1172,7 @@ impl ConversationManager {
                     true,
                     mcp_path.as_deref(),
                 );
-                let env = proxy_env(conv.proxy.as_deref());
+                let env = session_env(&conv.id, conv.proxy.as_deref(), self.mcp_inject.as_ref());
                 let chat = spawn_and_connect_chat(&conv.id, &runner_args, &cwd, &env).await?;
                 conv.chat_client = Some(chat);
             }
@@ -1147,6 +1190,23 @@ impl ConversationManager {
 
     pub fn get(&self, id: &Uuid) -> Option<&Conversation> {
         self.convs.get(id)
+    }
+
+    /// Record what the agent in `id` is doing. Last event wins: every
+    /// transition is caused by a lifecycle hook, so the most recent one is by
+    /// definition the current truth — there is no timer racing it.
+    ///
+    /// Returns `false` for an unknown id, which is normal rather than an
+    /// error: a hook can arrive from a claude the user launched by hand
+    /// inside a session that has since been deleted.
+    pub fn set_activity(&mut self, id: &Uuid, activity: Activity) -> bool {
+        match self.convs.get_mut(id) {
+            Some(conv) => {
+                conv.activity = activity;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Resolve a chat session name to its uuid. Returns `None` for unknown
@@ -1354,6 +1414,7 @@ mod tests {
             use_worktree: false,
             worktree_branch: None,
             parent_id: None,
+            activity: Activity::Unknown,
             mode: SessionMode::Terminal,
         };
         let s = serde_json::to_string(&info).unwrap();
@@ -1745,6 +1806,7 @@ mod tests {
             mode: SessionMode::Terminal,
             client: None,
             chat_client: None,
+            activity: Activity::Unknown,
         }
     }
 

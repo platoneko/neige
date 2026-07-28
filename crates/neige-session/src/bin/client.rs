@@ -124,6 +124,9 @@ async fn main() -> anyhow::Result<()> {
                 stdout.write_all(&b).await?;
                 stdout.flush().await?;
             }
+            // This CLI mirrors the PTY byte stream; foreground state is for
+            // neige-server's session list, not for a terminal.
+            DaemonMsg::Foreground { .. } => {}
             DaemonMsg::ChatEvent { json } => {
                 stdout.write_all(json.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;

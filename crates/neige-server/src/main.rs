@@ -1,3 +1,4 @@
+mod activity;
 mod api;
 mod attach;
 mod auth;
@@ -140,6 +141,29 @@ enum Command {
         #[command(subcommand)]
         cmd: AuthCmd,
     },
+    /// Claude Code lifecycle hooks, which drive each session's activity dot
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum HooksCmd {
+    /// Merge neige's hooks into ~/.claude/settings.json. Needed once per
+    /// machine; installing globally is what lets neige see a `claude` you
+    /// start by hand at a shell prompt, not just the ones it spawns.
+    Install {
+        /// Path to the neige-hook binary (defaults to alongside this one)
+        #[arg(long)]
+        shim_path: Option<String>,
+    },
+    /// Remove neige's hooks from ~/.claude/settings.json, leaving any hooks
+    /// you configured yourself untouched.
+    Uninstall {
+        #[arg(long)]
+        shim_path: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -153,6 +177,40 @@ enum AuthCmd {
         #[arg(long, default_value = "http://127.0.0.1:3030")]
         bind: String,
     },
+}
+
+/// Run `hooks install` / `hooks uninstall`, exiting non-zero on failure so a
+/// setup script notices. Both directions share the path resolution and the
+/// reporting; only the verb differs.
+fn run_hooks_command(shim_path: Option<&str>, install: bool) {
+    let resolved = shim_path
+        .map(|p| Ok(std::path::PathBuf::from(p)))
+        .unwrap_or_else(activity::install::default_shim_path);
+    let (shim, settings) = match (resolved, activity::install::settings_path()) {
+        (Ok(shim), Ok(settings)) => (shim, settings),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let result = if install {
+        activity::install::install(&settings, &shim)
+    } else {
+        activity::install::uninstall(&settings, &shim)
+    };
+    match result {
+        Ok(()) if install => {
+            println!("Installed neige hooks into {}", settings.display());
+            println!("  shim: {}", shim.display());
+            println!();
+            println!("Claude sessions started from now on report their activity to neige.");
+        }
+        Ok(()) => println!("Removed neige hooks from {}", settings.display()),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn resolve_dist_dir(cli_path: Option<&str>, subdir: &str) -> std::path::PathBuf {
@@ -331,6 +389,14 @@ async fn main() {
                     std::process::exit(2);
                 }
             },
+            Command::Hooks { cmd } => {
+                let (shim_path, install) = match cmd {
+                    HooksCmd::Install { shim_path } => (shim_path, true),
+                    HooksCmd::Uninstall { shim_path } => (shim_path, false),
+                };
+                run_hooks_command(shim_path.as_deref(), install);
+                return;
+            }
         }
     }
 
