@@ -23,7 +23,7 @@ interface Props {
 export function TerminalPane({ conv, active, onOverview, onPrev, onNext, canCycle }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
-  const { sendText, sendKey, status, busy, termRef } = useTerminal(ref, conv.id)
+  const { sendText, sendKey, status, termRef } = useTerminal(ref, conv.id)
 
   // Drag-to-scroll inside the terminal body. xterm captures touches for text
   // selection by default, so we intercept and drive the viewport ourselves.
@@ -206,7 +206,11 @@ export function TerminalPane({ conv, active, onOverview, onPrev, onNext, canCycl
           if (action === 'scrollBottom') termRef.current?.scrollToBottom()
         }}
       />
-      <ComposeBar busy={busy} onSend={sendText} onStop={() => sendText('\x1b')} />
+      <ComposeBar
+        busy={conv.activity === 'working'}
+        onSend={sendText}
+        onStop={() => sendText('\x1b')}
+      />
     </div>
   )
 }

@@ -9,6 +9,7 @@ import {
   Terminal as TerminalIcon,
 } from 'lucide-react';
 import type { ConvInfo } from '../types';
+import { activityClass, rollUpActivity, type Activity } from '@neige/shared';
 import { staleOverrides, type OpenFile, type TaskGroup } from '../tasks';
 
 function timeAgo(iso: string): string {
@@ -91,7 +92,11 @@ interface AgentRowProps {
   expandable: boolean;
   expanded: boolean;
   onToggle: () => void;
-  busy: boolean;
+  /**
+   * What to indicate on this row. Usually the conv's own activity; a
+   * collapsed task row passes its children's roll-up instead.
+   */
+  activity: Activity;
   active: boolean;
   open: boolean;
   onSelect: (id: string) => void;
@@ -106,7 +111,7 @@ function AgentRow({
   expandable,
   expanded,
   onToggle,
-  busy,
+  activity,
   active,
   open,
   onSelect,
@@ -116,7 +121,7 @@ function AgentRow({
 }: AgentRowProps) {
   return (
     <div
-      className={`conv-item ${isTask ? 'task-row' : 'agent-row'} ${active ? 'active' : ''} ${open ? 'open' : ''} ${busy ? 'busy' : ''}`}
+      className={`conv-item ${isTask ? 'task-row' : 'agent-row'} ${active ? 'active' : ''} ${open ? 'open' : ''} ${activityClass(activity)}`}
       onClick={() => onSelect(conv.id)}
     >
       <button
@@ -248,7 +253,6 @@ interface TaskTreeProps {
   openTabs: string[];
   activeTab: string | null;
   openFiles: OpenFile[];
-  busyIds: ReadonlySet<string>;
   onSelect: (id: string) => void;
   onSelectFile: (panelId: string) => void;
   onCloseFile: (panelId: string) => void;
@@ -262,7 +266,6 @@ export function TaskTree({
   openTabs,
   activeTab,
   openFiles,
-  busyIds,
   onSelect,
   onSelectFile,
   onCloseFile,
@@ -335,9 +338,10 @@ export function TaskTree({
               expandable={task.children.length > 0 || rootFiles.length > 0}
               expanded={taskExpanded}
               onToggle={() => toggle(task.root.id)}
-              busy={
-                busyIds.has(task.root.id) ||
-                (!taskExpanded && task.children.some((c) => busyIds.has(c.id)))
+              activity={
+                taskExpanded
+                  ? task.root.activity
+                  : rollUpActivity([task.root, ...task.children])
               }
               active={activeTab === task.root.id}
               open={openTabs.includes(task.root.id)}
@@ -369,7 +373,7 @@ export function TaskTree({
                         expandable={childFiles.length > 0}
                         expanded={childExpanded}
                         onToggle={() => toggle(child.id)}
-                        busy={busyIds.has(child.id)}
+                        activity={child.activity}
                         active={activeTab === child.id}
                         open={openTabs.includes(child.id)}
                         onSelect={onSelect}

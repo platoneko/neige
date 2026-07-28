@@ -9,7 +9,6 @@ export interface UseTerminalApi {
   sendText: (s: string) => void
   sendKey: (s: string) => void
   status: TerminalStatus
-  busy: boolean
   termRef: RefObject<Terminal | null>
 }
 
@@ -18,7 +17,10 @@ export interface UseTerminalApi {
  * layers on:
  *   - mobile theme + system-ui mono font
  *   - `cardActivity` notifications so card badges flash on output
- *   - local React state for `status` / `busy` so the pane header updates
+ *   - local React state for `status` so the pane header updates
+ *
+ * Whether the agent is busy is not decided here — it comes from the server on
+ * `ConvInfo.activity`.
  *   - `visualViewport.resize` fit so the virtual keyboard doesn't leave the
  *     terminal with the wrong dimensions
  */
@@ -27,7 +29,6 @@ export function useTerminal(
   sessionId: string | null,
 ): UseTerminalApi {
   const [status, setStatus] = useState<TerminalStatus>('connecting')
-  const [busy, setBusy] = useState(false)
 
   const theme = useMemo(
     () => ({
@@ -50,7 +51,6 @@ export function useTerminal(
       "ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace",
     xtermOptions,
     onActivity: (id) => cardActivity.onOutput(id),
-    onBusyChange: setBusy,
     onStatusChange: setStatus,
   })
 
@@ -69,5 +69,5 @@ export function useTerminal(
   const sendText = (s: string) => sendData(s)
   const sendKey = sendText
 
-  return { sendText, sendKey, status, busy, termRef }
+  return { sendText, sendKey, status, termRef }
 }

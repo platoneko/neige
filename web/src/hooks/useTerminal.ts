@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useMemo } from 'react';
 import type { RefObject } from 'react';
 import { useTerminalCore } from '@neige/shared';
-import { terminalBusyStore, useTerminalBusy } from './terminalBusy';
 
 /**
  * Desktop-flavoured terminal hook. Thin wrapper over `useTerminalCore` that
@@ -9,8 +8,10 @@ import { terminalBusyStore, useTerminalBusy } from './terminalBusy';
  *   - desktop theme + JetBrains-style mono font
  *   - Cmd+Arrow / Cmd+Backspace shortcuts so macOS doesn't eat them as
  *     history navigation
- *   - publishes busy state into the global `terminalBusyStore` so the
- *     sidebar badge + per-tab overlay can subscribe without prop drilling
+ *
+ * Session activity is not computed here — it comes from the server on
+ * `ConvInfo.activity`, so it exists for every session rather than only the
+ * ones with a mounted terminal.
  */
 export function useTerminal(containerId: string | null) {
   // The existing desktop markup uses `id={terminal-<convId>}` instead of
@@ -41,9 +42,6 @@ export function useTerminal(containerId: string | null) {
     [],
   );
 
-  const sessionIdRef = useRef<string | null>(containerId);
-  sessionIdRef.current = containerId;
-
   const { termRef, wsRef, fitRef, sendData } = useTerminalCore({
     containerRef,
     sessionId: containerId,
@@ -51,10 +49,6 @@ export function useTerminal(containerId: string | null) {
     fontSize: 14,
     fontFamily:
       "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-    onBusyChange: (busy) => {
-      const id = sessionIdRef.current;
-      if (id) terminalBusyStore.set(id, busy);
-    },
     onTerminalReady: (term) => {
       // Cmd+Left/Right → line start/end, Cmd+Backspace → kill line. The
       // browser swallows these by default (history nav), so intercept and
@@ -84,17 +78,5 @@ export function useTerminal(containerId: string | null) {
     },
   });
 
-  // Clear any lingering busy state for this id when we dispose. The core
-  // fires onBusyChange(false) on teardown, but only if we were busy at the
-  // time — explicit clear is cheap insurance.
-  useEffect(() => {
-    const id = containerId;
-    return () => {
-      if (id) terminalBusyStore.set(id, false);
-    };
-  }, [containerId]);
-
-  const busy = useTerminalBusy(containerId);
-
-  return { termRef, wsRef, fitRef, busy };
+  return { termRef, wsRef, fitRef };
 }

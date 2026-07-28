@@ -20,12 +20,11 @@ interface TerminalPanelProps {
 
 /** The component dockview renders inside each panel */
 function TerminalComponent({ params }: IDockviewPanelProps<{ convId: string }>) {
-  const { busy } = useTerminal(params.convId);
+  useTerminal(params.convId);
 
   return (
     <div className="terminal-view">
       <div id={`terminal-${params.convId}`} className="terminal-container" />
-      {busy && <div className="terminal-busy-overlay" />}
     </div>
   );
 }

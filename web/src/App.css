@@ -785,19 +785,20 @@
   overflow: hidden;
 }
 
-.terminal-busy-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  z-index: 5;
-  pointer-events: none;
-  transition: opacity 0.3s ease;
-}
-
+/* Working: recede. The agent is fine and doesn't need you. */
 .conv-item.busy,
 .conv-dot-btn.busy {
   opacity: 0.45;
   transition: opacity 0.3s ease;
+}
+
+/* Blocked on the user: the one state worth interrupting them for. Marked
+   rather than dimmed, so it reads against a row of working siblings. */
+.conv-item.awaiting,
+.conv-dot-btn.awaiting {
+  opacity: 1;
+  box-shadow: inset 2px 0 0 var(--yellow);
+  transition: box-shadow 0.3s ease;
 }
 
 /* ===== Empty State ===== */
