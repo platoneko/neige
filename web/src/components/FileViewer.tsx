@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { Marked } from 'marked';
 import { DropdownMenu } from '@radix-ui/themes';
 import { authedFetch, fileUrl as buildFileUrl } from '../api';
 import { writeClipboard } from '../clipboard';
+import { SearchBar, createSearchAdapter, type SearchAdapter } from './FileSearch';
 import {
   MarkdownToc,
   stripInlineMarkdown,
@@ -137,7 +145,20 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
   // affordance, not a global preference.
   const [tocCollapsed, setTocCollapsed] = useState(false);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
-  const paneContainerRef = useRef<HTMLDivElement | null>(null);
+  // The body of whichever pane is showing — the rendered markdown or the
+  // <pre>. Also the root for in-file search, which is why it deliberately
+  // excludes the TOC: heading text must not count as matches.
+  const paneContainerRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  // In-file search. Not persisted anywhere: it's a "reading this file right
+  // now" affordance, and a stale query surfacing on the next open would be
+  // more surprising than helpful.
+  const [barOpen, setBarOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [matchCurrent, setMatchCurrent] = useState(0);
+  const [matchTotal, setMatchTotal] = useState(0);
+  const adapterRef = useRef<SearchAdapter | null>(null);
+  const barInputRef = useRef<HTMLInputElement | null>(null);
 
   const isMarkdown = language === 'markdown';
 
@@ -281,6 +302,73 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     setTocCollapsed((c) => !c);
   }, []);
 
+  // Both panes report through one ref, so the search effect below doesn't have
+  // to know which one is mounted.
+  const setPaneContainer = useCallback((el: HTMLElement | null) => {
+    paneContainerRef.current = el;
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    setBarOpen(false);
+    setSearchQuery('');
+    contentRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  // A new file starts from a clean slate; clearing the query drops the
+  // highlights and zeroes the counter through the effect below. Adjusting
+  // during render rather than in an effect so the bar never paints once
+  // against the wrong file.
+  const [searchedFile, setSearchedFile] = useState(filePath);
+  if (searchedFile !== filePath) {
+    setSearchedFile(filePath);
+    setBarOpen(false);
+    setSearchQuery('');
+  }
+
+  // The adapter is rebuilt whenever the query changes or the pane's DOM is
+  // replaced — switching panes, refreshing, picking up an on-disk change.
+  // Ranges captured against a replaced tree point at detached nodes, so
+  // re-deriving them is the only correct move; `next`/`prev` walk the existing
+  // ranges without touching state and so do not trigger a rebuild.
+  useEffect(() => {
+    const container = paneContainerRef.current;
+    if (!container) return;
+    const adapter = createSearchAdapter(container, contentRef.current, (current, total) => {
+      setMatchCurrent(current);
+      setMatchTotal(total);
+    });
+    adapterRef.current = adapter;
+    adapter.setQuery(searchQuery);
+    return () => {
+      adapter.dispose();
+      adapterRef.current = null;
+    };
+  }, [isMarkdown, markdownHtml, content, searchQuery]);
+
+  // Focus the pane so `/` works without a click first — but only when nothing
+  // else holds focus. Opening a file into a background tab must not yank the
+  // caret out of the chat composer.
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && !el.contains(active)) return;
+    el.focus({ preventScroll: true });
+  }, [filePath, loading]);
+
+  // `/` is the only entry point; Cmd/Ctrl+F stays with the browser's own Find.
+  // The bar renders as a sibling of this container, so a `/` typed into the
+  // search input never reaches here.
+  const handleContentKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== '/') return;
+    e.preventDefault();
+    setBarOpen(true);
+    // No-op on first open (the input isn't mounted yet — SearchBar focuses
+    // itself); this handles `/` pressed while the bar is already open.
+    barInputRef.current?.focus();
+    barInputRef.current?.select();
+  };
+
   if (isImage) {
     const cacheKey = normalizeEtag(etag);
     return (
@@ -350,12 +438,17 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <div className="file-viewer-content">
+      <div
+        className="file-viewer-content"
+        ref={contentRef}
+        tabIndex={0}
+        onKeyDown={handleContentKeyDown}
+      >
         {isMarkdown ? (
           <div className="file-viewer-markdown-wrap">
             <div
               className="file-viewer-markdown"
-              ref={paneContainerRef}
+              ref={setPaneContainer}
               dangerouslySetInnerHTML={{ __html: markdownHtml }}
             />
             {headings.length > 0 && (
@@ -369,11 +462,23 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
             )}
           </div>
         ) : (
-          <pre className="file-viewer-code">
+          <pre className="file-viewer-code" ref={setPaneContainer}>
             <code>{content}</code>
           </pre>
         )}
       </div>
+      {barOpen && (
+        <SearchBar
+          inputRef={barInputRef}
+          query={searchQuery}
+          current={matchCurrent}
+          total={matchTotal}
+          onChange={setSearchQuery}
+          onNext={() => adapterRef.current?.next()}
+          onPrev={() => adapterRef.current?.prev()}
+          onClose={closeSearch}
+        />
+      )}
     </div>
   );
 }
