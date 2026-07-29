@@ -1671,10 +1671,17 @@
   margin: 0.3em 0;
 }
 
+/* Wide tables scroll inside themselves instead of overflowing the pane. The
+   markdown body is a `min-width: 0` flex item, so without this a table whose
+   min-content width exceeds the pane spills to the right and gets painted over
+   by the TOC sidebar, which sits later in the flex row. */
 .file-viewer-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   margin: 1em 0;
-  width: 100%;
 }
 
 .file-viewer-markdown th,
