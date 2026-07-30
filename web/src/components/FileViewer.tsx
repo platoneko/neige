@@ -169,6 +169,15 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
         : { html: '', headings: [] as TocHeading[] },
     [isMarkdown, content],
   );
+  // Stabilize the prop object identity. React 19 diffs `dangerouslySetInnerHTML`
+  // by reference (`nextProp === prevProp`); a fresh `{ __html }` on every render
+  // makes it reassign `innerHTML`, which destroys text nodes and collapses any
+  // CSS Custom Highlight Ranges collected against them — so search matches
+  // count correctly but never paint. Only rebuild when the HTML string changes.
+  const markdownHtmlProp = useMemo(
+    () => ({ __html: markdownHtml }),
+    [markdownHtml],
+  );
 
   const loadText = useCallback(async () => {
     setLoading(true);
@@ -449,7 +458,7 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
             <div
               className="file-viewer-markdown"
               ref={setPaneContainer}
-              dangerouslySetInnerHTML={{ __html: markdownHtml }}
+              dangerouslySetInnerHTML={markdownHtmlProp}
             />
             {headings.length > 0 && (
               <MarkdownToc
