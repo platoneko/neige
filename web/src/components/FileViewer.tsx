@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -169,15 +170,6 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
         : { html: '', headings: [] as TocHeading[] },
     [isMarkdown, content],
   );
-  // Stabilize the prop object identity. React 19 diffs `dangerouslySetInnerHTML`
-  // by reference (`nextProp === prevProp`); a fresh `{ __html }` on every render
-  // makes it reassign `innerHTML`, which destroys text nodes and collapses any
-  // CSS Custom Highlight Ranges collected against them — so search matches
-  // count correctly but never paint. Only rebuild when the HTML string changes.
-  const markdownHtmlProp = useMemo(
-    () => ({ __html: markdownHtml }),
-    [markdownHtml],
-  );
 
   const loadText = useCallback(async () => {
     setLoading(true);
@@ -317,9 +309,26 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     paneContainerRef.current = el;
   }, []);
 
+  // Write markdown HTML ourselves instead of `dangerouslySetInnerHTML`.
+  // React 19 diffs that prop by object identity and, on any new `{ __html }`
+  // reference, reassigns `element.innerHTML` even when the string is unchanged
+  // — which destroys text nodes and collapses CSS Custom Highlight Ranges.
+  // Memoizing the prop object is easy to regress; a layout effect that only
+  // runs when the HTML string changes never rewrites the tree on search
+  // keystrokes, match-index updates, or TOC scrollspy.
+  useLayoutEffect(() => {
+    if (!isMarkdown) return;
+    const el = paneContainerRef.current;
+    if (!el) return;
+    el.innerHTML = markdownHtml;
+  }, [isMarkdown, markdownHtml]);
+
   const closeSearch = useCallback(() => {
     setBarOpen(false);
     setSearchQuery('');
+    adapterRef.current?.setQuery('');
+    setMatchCurrent(0);
+    setMatchTotal(0);
     contentRef.current?.focus({ preventScroll: true });
   }, []);
 
@@ -334,11 +343,11 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     setSearchQuery('');
   }
 
-  // The adapter is rebuilt whenever the query changes or the pane's DOM is
-  // replaced — switching panes, refreshing, picking up an on-disk change.
-  // Ranges captured against a replaced tree point at detached nodes, so
-  // re-deriving them is the only correct move; `next`/`prev` walk the existing
-  // ranges without touching state and so do not trigger a rebuild.
+  // Rebuild the adapter only when the pane's DOM is replaced (markdown↔source,
+  // refresh, on-disk content change). Ranges point at text nodes, so a new
+  // tree needs a fresh collect — but keystrokes must NOT tear the adapter
+  // down: dispose/recreate on every `searchQuery` change races with next/prev
+  // and with the paint path that depends on stable Range targets.
   useEffect(() => {
     const container = paneContainerRef.current;
     if (!container) return;
@@ -352,7 +361,15 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
       adapter.dispose();
       adapterRef.current = null;
     };
-  }, [isMarkdown, markdownHtml, content, searchQuery]);
+    // searchQuery is read only for the initial apply after a DOM rebuild; live
+    // keystrokes go through handleSearchChange → adapter.setQuery.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above
+  }, [isMarkdown, markdownHtml, content]);
+
+  const handleSearchChange = useCallback((value: string) => {
+    setSearchQuery(value);
+    adapterRef.current?.setQuery(value);
+  }, []);
 
   // Focus the pane so `/` works without a click first — but only when nothing
   // else holds focus. Opening a file into a background tab must not yank the
@@ -458,7 +475,6 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
             <div
               className="file-viewer-markdown"
               ref={setPaneContainer}
-              dangerouslySetInnerHTML={markdownHtmlProp}
             />
             {headings.length > 0 && (
               <MarkdownToc
@@ -482,7 +498,7 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
           query={searchQuery}
           current={matchCurrent}
           total={matchTotal}
-          onChange={setSearchQuery}
+          onChange={handleSearchChange}
           onNext={() => adapterRef.current?.next()}
           onPrev={() => adapterRef.current?.prev()}
           onClose={closeSearch}
