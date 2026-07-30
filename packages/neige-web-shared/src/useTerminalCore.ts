@@ -199,10 +199,21 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       rafId = 0;
       const chunks = writeBuf;
       writeBuf = [];
+      let sawReset = false;
       for (const c of chunks) {
-        if (c.reset) term.reset();
+        if (c.reset) {
+          // seq=0 snapshot: hard-reset then repaint. The server prefixes
+          // active DEC private modes (mouse / alt-screen / …) so a TUI
+          // that enabled them at startup still receives wheel events after
+          // the panel was closed and remounted — see DecModeTracker.
+          term.reset();
+          sawReset = true;
+        }
         term.write(c.bytes);
       }
+      // Remount + snapshot often lands before dockview has finished sizing
+      // the panel; refit so the PTY and xterm agree on cols/rows.
+      if (sawReset) scheduleFit();
     };
 
     const wireWs = (ws: WebSocket) => {
