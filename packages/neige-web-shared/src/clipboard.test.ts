@@ -112,4 +112,34 @@ describe('writeClipboardSync', () => {
     expect(writeClipboardSync('from-osc52')).toBe(true);
     expect(copied).toBe('from-osc52');
   });
+
+  it('reports selectionCopy result even in a secure context (no false ok)', () => {
+    // Fire-and-forget writeText must not make us claim success — OSC 52
+    // queueing needs a truthful boolean so a denied write stays pending.
+    vi.stubGlobal('isSecureContext', true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    spyExec(() => false);
+
+    expect(writeClipboardSync('held-for-gesture')).toBe(false);
+    expect(writeText).toHaveBeenCalledWith('held-for-gesture');
+  });
+
+  it('returns true in a secure context when selectionCopy works', () => {
+    vi.stubGlobal('isSecureContext', true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    let copied = '';
+    spyExec((cmd) => {
+      if (cmd === 'copy') {
+        copied = window.getSelection()?.toString() ?? '';
+        return true;
+      }
+      return false;
+    });
+
+    expect(writeClipboardSync('synced')).toBe(true);
+    expect(copied).toBe('synced');
+    expect(writeText).toHaveBeenCalledWith('synced');
+  });
 });

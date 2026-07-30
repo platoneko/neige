@@ -124,30 +124,43 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     // and forward it through `writeClipboard` (Clipboard API on https, or
     // selection+execCommand on plain HTTP).
     //
-    // OSC 52 arrives as PTY output — no browser user-gesture — so on HTTP
-    // the synchronous fallback often fails. Queue the text and flush on the
-    // next keydown/pointerdown inside the terminal, which re-enters with
-    // transient activation. Without that, Grok's "copy sent to ~/.grok/…"
-    // toast is the only place the text lands.
+    // OSC 52 arrives as PTY output over the WebSocket — by the time it hits
+    // the browser the keypress that triggered the copy is long gone, so we
+    // have no transient activation. Immediate write usually fails on plain
+    // HTTP (and often on https without a sticky clipboard grant). Stage the
+    // text and flush on the next real user gesture; without that, Grok's
+    // "copy sent to ~/.grok/…" toast is the only place the text lands.
+    //
+    // Always stage first, then clear only on confirmed success: an async
+    // Clipboard API denial that arrives after a later copy must not clobber
+    // the newer pending payload, and must not drop text if we optimistically
+    // cleared before knowing the write failed.
     let pendingOsc52: string | null = null;
     const flushPendingOsc52 = () => {
       if (pendingOsc52 === null) return;
       const text = pendingOsc52;
       // Clear first so a nested event during copy can't re-enter forever.
       pendingOsc52 = null;
-      if (!writeClipboardSync(text)) {
-        // Gesture still not enough (rare); keep for a later try.
-        pendingOsc52 = text;
-      }
+      if (writeClipboardSync(text)) return;
+      // Still inside a user gesture: try the async path too (https with a
+      // sticky grant may succeed even when selection+execCommand refuses).
+      void writeClipboard(text).then((ok) => {
+        if (!ok && pendingOsc52 === null) pendingOsc52 = text;
+      });
     };
     const onGestureForClipboard = () => {
       flushPendingOsc52();
     };
-    // Document capture: user often Alt-Tabs or clicks the browser chrome
-    // right after Grok's copy toast — flushing only on the terminal node
-    // would miss that gesture and leave the system clipboard empty.
-    document.addEventListener('keydown', onGestureForClipboard, true);
-    document.addEventListener('pointerdown', onGestureForClipboard, true);
+    // Document capture: Grok's toast is in-terminal (no browser click), so
+    // the next keystroke or any click on the page — including chrome outside
+    // the xterm node — has to re-enter with transient activation.
+    // keyup/pointerup cover the case where activation is only granted on
+    // release in some browsers, and catch gestures that started before the
+    // OSC frame arrived over the WS.
+    const gestureOpts: AddEventListenerOptions = { capture: true };
+    for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
+      document.addEventListener(evt, onGestureForClipboard, gestureOpts);
+    }
 
     const osc52Disposable = term.parser.registerOscHandler(52, (data) => {
       const semi = data.indexOf(';');
@@ -159,16 +172,16 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       try {
         const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);
+        // Stage before attempting write so a slow async failure can't race
+        // past a newer copy, and so a denied write still has something to
+        // flush on the next gesture.
+        pendingOsc52 = text;
         if (window.isSecureContext) {
-          // Clipboard API is async; on denial queue for the next gesture.
           void writeClipboard(text).then((ok) => {
-            if (!ok) pendingOsc52 = text;
+            // Only clear if nothing newer has replaced the pending payload.
+            if (ok && pendingOsc52 === text) pendingOsc52 = null;
           });
-        } else if (!writeClipboardSync(text)) {
-          // Plain HTTP: selection+execCommand only works with a user
-          // gesture. Queue until the next key/click in the terminal.
-          pendingOsc52 = text;
-        } else {
+        } else if (writeClipboardSync(text)) {
           pendingOsc52 = null;
         }
       } catch {
@@ -402,8 +415,9 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener('resize', scheduleFit);
       document.removeEventListener('visibilitychange', onVisibility);
-      document.removeEventListener('keydown', onGestureForClipboard, true);
-      document.removeEventListener('pointerdown', onGestureForClipboard, true);
+      for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
+        document.removeEventListener(evt, onGestureForClipboard, gestureOpts);
+      }
       pendingOsc52 = null;
       ro.disconnect();
       dataDisposable.dispose();
