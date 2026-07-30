@@ -69,6 +69,31 @@ fn tie_to_parent_enabled() -> bool {
     )
 }
 
+/// Make a child process's environment suitable for an interactive color TTY.
+///
+/// Clears agent/CI color suppressors that neige-server may have inherited
+/// (`NO_COLOR`, `CLICOLOR=0`, `FORCE_COLOR=0`, `TERM=dumb`) and installs a
+/// 256-color + truecolor capability pair that xterm.js can render.
+fn apply_interactive_term_env(cmd: &mut Command) {
+    for key in [
+        "NO_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "FORCE_COLOR",
+        // Some runners also pin these; leave real TERM handling to the
+        // values we set below rather than inheriting `dumb`.
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    // Positive force flags for tools that ignore TERM and only look at these
+    // (node chalk, many Rust CLIs, macOS CLICOLOR_FORCE).
+    cmd.env("FORCE_COLOR", "1");
+    cmd.env("CLICOLOR", "1");
+    cmd.env("CLICOLOR_FORCE", "1");
+}
+
 /// Ensure a daemon is running for `id`. Idempotent: if one is already live,
 /// `program` / `cwd` / `env` are ignored and the caller just reattaches.
 /// Returns `Ok(true)` when a fresh daemon was spawned.
@@ -150,8 +175,13 @@ async fn spawn_daemon(
         cmd.arg("--tie-to-parent");
     }
     cmd.args(tail);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
+    // Sessions are interactive PTYs. neige-server itself is often launched
+    // from an agent shell (Grok/Claude/CI) that exports NO_COLOR=1,
+    // CLICOLOR=0, FORCE_COLOR=0, TERM=dumb so *its* stdout stays plain.
+    // Those vars inherit into the daemon → PTY child and silence colors in
+    // every TUI (Grok, claude, ls, …). Scrub them and force a color-capable
+    // terminal before applying the per-session env overrides.
+    apply_interactive_term_env(&mut cmd);
     for (k, v) in env {
         cmd.env(k, v);
     }

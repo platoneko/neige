@@ -328,9 +328,26 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
     // Forward every env var we have to the child. The caller (neige-server)
     // sets the env it wants (TERM, COLORTERM, proxy vars, ...) when it spawns
     // us, and the child should see the same environment.
+    //
+    // Scrub color-suppressors that may still be present if the daemon was
+    // started outside the normal spawn path (or an older server). Interactive
+    // PTYs always want color; xterm.js can render 256/truecolor SGR.
+    const COLOR_SUPPRESSORS: &[&str] = &["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR"];
     for (k, v) in std::env::vars() {
+        if COLOR_SUPPRESSORS.contains(&k.as_str()) {
+            continue;
+        }
         cmd.env(k, v);
     }
+    // Ensure positive capability even when the daemon process itself was
+    // started with a stripped env.
+    cmd.env("TERM", std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()));
+    if std::env::var_os("COLORTERM").is_none() {
+        cmd.env("COLORTERM", "truecolor");
+    }
+    cmd.env("FORCE_COLOR", "1");
+    cmd.env("CLICOLOR", "1");
+    cmd.env("CLICOLOR_FORCE", "1");
     let child = pair.slave.spawn_command(cmd)?;
     // Split out a separately-owned killer before the child moves into the
     // waiter task. A ClientMsg::Kill handler calls through this.
