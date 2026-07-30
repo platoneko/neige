@@ -21,6 +21,8 @@ export interface SearchAdapter {
 // not paint anything.
 interface HighlightLike {
   add(range: Range): void;
+  /** Higher wins when two highlights cover the same range. */
+  priority?: number;
 }
 
 interface HighlightCtor {
@@ -150,7 +152,12 @@ export function createSearchAdapter(
     registry.set(HIGHLIGHT_ALL, all);
 
     const current = ranges[currentIndex];
-    registry.set(HIGHLIGHT_CURRENT, new Highlight(current));
+    // Prefer the current match when both highlights cover the same range;
+    // equal priority leaves paint order to registration order, which can hide
+    // the stronger "current" style under the all-matches wash.
+    const currentHl = new Highlight(current);
+    currentHl.priority = 1;
+    registry.set(HIGHLIGHT_CURRENT, currentHl);
     scrollRangeIntoView(current, scroller);
     onCount(currentIndex + 1, ranges.length);
   };
