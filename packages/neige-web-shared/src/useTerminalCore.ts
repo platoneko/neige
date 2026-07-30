@@ -3,6 +3,7 @@ import type { RefObject } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { ITheme, ITerminalOptions } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { writeClipboard, writeClipboardSync } from './clipboard';
 
 /**
  * Shared WS framing contract (see crates/neige-server/src/api/ws.rs handle_ws):
@@ -119,21 +120,60 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     onTerminalReadyRef.current?.(term);
 
     // xterm.js drops OSC 52 by default, which silently breaks copy from
-    // nvim/tmux inside the embedded terminal. Decode the base64 payload and
-    // forward it to the system clipboard. navigator.clipboard needs a secure
-    // context (https or localhost); on plain http it's undefined and the
-    // write is a no-op, which matches xterm.js's prior behavior.
+    // nvim/tmux/Grok inside the embedded terminal. Decode the base64 payload
+    // and forward it through `writeClipboard` (Clipboard API on https, or
+    // selection+execCommand on plain HTTP).
+    //
+    // OSC 52 arrives as PTY output — no browser user-gesture — so on HTTP
+    // the synchronous fallback often fails. Queue the text and flush on the
+    // next keydown/pointerdown inside the terminal, which re-enters with
+    // transient activation. Without that, Grok's "copy sent to ~/.grok/…"
+    // toast is the only place the text lands.
+    let pendingOsc52: string | null = null;
+    const flushPendingOsc52 = () => {
+      if (pendingOsc52 === null) return;
+      const text = pendingOsc52;
+      // Clear first so a nested event during copy can't re-enter forever.
+      pendingOsc52 = null;
+      if (!writeClipboardSync(text)) {
+        // Gesture still not enough (rare); keep for a later try.
+        pendingOsc52 = text;
+      }
+    };
+    const onGestureForClipboard = () => {
+      flushPendingOsc52();
+    };
+    // Document capture: user often Alt-Tabs or clicks the browser chrome
+    // right after Grok's copy toast — flushing only on the terminal node
+    // would miss that gesture and leave the system clipboard empty.
+    document.addEventListener('keydown', onGestureForClipboard, true);
+    document.addEventListener('pointerdown', onGestureForClipboard, true);
+
     const osc52Disposable = term.parser.registerOscHandler(52, (data) => {
       const semi = data.indexOf(';');
       if (semi < 0) return true;
-      const payload = data.slice(semi + 1);
+      // Strip whitespace: some TUIs wrap long base64 payloads.
+      const payload = data.slice(semi + 1).replace(/\s+/g, '');
       // "?" is a read-back query; empty clears the selection. Neither writes.
       if (!payload || payload === '?') return true;
       try {
         const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);
-        navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
-      } catch { /* malformed base64 */ }
+        if (window.isSecureContext) {
+          // Clipboard API is async; on denial queue for the next gesture.
+          void writeClipboard(text).then((ok) => {
+            if (!ok) pendingOsc52 = text;
+          });
+        } else if (!writeClipboardSync(text)) {
+          // Plain HTTP: selection+execCommand only works with a user
+          // gesture. Queue until the next key/click in the terminal.
+          pendingOsc52 = text;
+        } else {
+          pendingOsc52 = null;
+        }
+      } catch {
+        /* malformed base64 */
+      }
       return true;
     });
 
@@ -351,6 +391,9 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener('resize', scheduleFit);
       document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('keydown', onGestureForClipboard, true);
+      document.removeEventListener('pointerdown', onGestureForClipboard, true);
+      pendingOsc52 = null;
       ro.disconnect();
       dataDisposable.dispose();
       osc52Disposable.dispose();
