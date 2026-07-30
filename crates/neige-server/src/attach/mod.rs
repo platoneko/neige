@@ -8,6 +8,7 @@
 
 pub mod chat;
 pub mod daemon;
+mod dec_modes;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
 use uuid::Uuid;
 
+use dec_modes::DecModeTracker;
 use neige_session::{ClientMsg, DaemonMsg, read_frame, write_frame};
 
 /// Rolling byte-chunk history, each chunk tagged with a monotonically
@@ -138,6 +140,14 @@ pub struct SessionClient {
     /// `crate::activity::Activity::demote_if_stale` relies on that
     /// distinction.
     last_output_at: Arc<Mutex<Option<Instant>>>,
+    /// Running DEC private-mode set derived from every byte that has flowed
+    /// through this SessionClient (Hello seed + live Stdout). Prefixed onto
+    /// Snapshot payloads so a remounted xterm.js recovers mouse / alt-screen
+    /// after `term.reset()`. See `dec_modes` for the full rationale.
+    ///
+    /// Updated under the same critical section as `history` appends so a
+    /// Snapshot always sees modes consistent with the bytes it replays.
+    modes: Arc<Mutex<DecModeTracker>>,
     #[allow(dead_code)]
     sock_path: PathBuf,
 }
@@ -166,6 +176,7 @@ impl SessionClient {
         };
 
         let history = Arc::new(Mutex::new(History::new(HISTORY_MAX_BYTES)));
+        let modes = Arc::new(Mutex::new(DecModeTracker::new()));
         let (tx, _) = broadcast::channel::<(u64, Vec<u8>)>(256);
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let foreground_running = Arc::new(Mutex::new(None));
@@ -173,8 +184,11 @@ impl SessionClient {
 
         // Seed history with the replay so a WS client that attaches after us
         // can be primed from Snapshot (not wait for the first live byte).
+        // Modes are fed from the same bytes so a later Snapshot can restore
+        // mouse / alt-screen even after those CSI sequences leave the ring.
         if !replay.is_empty() {
-            if let Ok(mut h) = history.lock() {
+            if let (Ok(mut h), Ok(mut m)) = (history.lock(), modes.lock()) {
+                m.feed(&replay);
                 let seq = h.append(replay.clone());
                 let _ = tx.send((seq, replay));
             }
@@ -183,6 +197,7 @@ impl SessionClient {
         // Reader: socket → (history + broadcast). Holds history lock while
         // broadcasting so attach() sees a consistent seq.
         let history_r = history.clone();
+        let modes_r = modes.clone();
         let tx_r = tx.clone();
         let alive_r = alive.clone();
         let foreground_r = foreground_running.clone();
@@ -199,7 +214,8 @@ impl SessionClient {
                         if let Ok(mut t) = last_output_r.lock() {
                             *t = Some(Instant::now());
                         }
-                        if let Ok(mut h) = history_r.lock() {
+                        if let (Ok(mut h), Ok(mut m)) = (history_r.lock(), modes_r.lock()) {
+                            m.feed(&bytes);
                             let seq = h.append(bytes.clone());
                             let _ = tx_r.send((seq, bytes));
                         }
@@ -243,6 +259,7 @@ impl SessionClient {
             ctrl_tx,
             tx,
             history,
+            modes,
             attach_id: Uuid::new_v4(),
             alive,
             foreground_running,
@@ -305,7 +322,10 @@ impl SessionClient {
         last_seq: Option<u64>,
         claimed_attach_id: Option<Uuid>,
     ) -> (broadcast::Receiver<(u64, Vec<u8>)>, AttachResult) {
+        // Lock history then modes (same order as the reader task) so we
+        // can't deadlock against a concurrent Stdout append.
         let history = self.history.lock().expect("history poisoned");
+        let modes = self.modes.lock().expect("modes poisoned");
         let rx = self.tx.subscribe();
         let latest = history.latest_seq();
         let earliest = history.earliest_seq();
@@ -325,10 +345,21 @@ impl SessionClient {
                     latest_seq: latest,
                 }
             }
-            _ => AttachResult::Snapshot {
-                bytes: history.full_snapshot(),
-                latest_seq: latest,
-            },
+            _ => {
+                // Client will `term.reset()` before writing these bytes.
+                // Prefix the active DEC private modes so mouse tracking /
+                // alt-screen survive a panel close+reopen even after the
+                // original enable CSI has left the history ring.
+                let restore = modes.restore_sequence();
+                let body = history.full_snapshot();
+                let mut bytes = Vec::with_capacity(restore.len() + body.len());
+                bytes.extend_from_slice(&restore);
+                bytes.extend_from_slice(&body);
+                AttachResult::Snapshot {
+                    bytes,
+                    latest_seq: latest,
+                }
+            }
         };
 
         (rx, result)
