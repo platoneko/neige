@@ -33,16 +33,24 @@ export async function writeClipboard(text: string): Promise<boolean> {
   return selectionCopy(text);
 }
 
-/** Synchronous path used when we already hold a user gesture (or want to
- *  avoid microtask gaps). Same branching as `writeClipboard` without await. */
+/**
+ * Synchronous path used when we already hold a user gesture (or want to
+ * avoid microtask gaps).
+ *
+ * Return value is truthful: only `selectionCopy` can confirm success inside
+ * this call. The Clipboard API is always async, so we never treat a fired
+ * `writeText` as done — OSC 52 queueing depends on a real boolean, and a
+ * false "ok" would drop the only copy of the text.
+ *
+ * On https we still kick `writeText` in parallel: some browsers honor a
+ * sticky clipboard permission without going through selection, and the
+ * extra write is harmless when selectionCopy already worked.
+ */
 export function writeClipboardSync(text: string): boolean {
   if (window.isSecureContext && navigator.clipboard?.writeText) {
-    // Still async under the hood — fire and hope. Prefer selectionCopy when
-    // the caller needs a reliable return value inside a gesture.
     void navigator.clipboard.writeText(text).catch(() => {
-      /* ignore */
+      /* ignore — selectionCopy result is authoritative */
     });
-    return true;
   }
   return selectionCopy(text);
 }
