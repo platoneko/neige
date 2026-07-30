@@ -10,11 +10,19 @@ build:
 # lifecycle); for dev use `NEIGE_TIE_TO_PARENT= just run`.
 [doc('Launch neige-server on 0.0.0.0:3131 in production mode (daemons tied to server)')]
 run *args:
+    # Strip agent/CI color-suppressors + nesting markers so sessions get a
+    # real interactive TTY env (TERM/COLORTERM are also forced at spawn).
     env -u CLAUDE_CODE_CHILD_SESSION \
         -u CLAUDE_CODE_SESSION_ID \
         -u CLAUDE_CODE_EXECPATH \
         -u CLAUDE_CODE_ENTRYPOINT \
         -u CLAUDECODE \
+        -u NO_COLOR \
+        -u CLICOLOR \
+        -u CLICOLOR_FORCE \
+        -u FORCE_COLOR \
+      TERM=xterm-256color \
+      COLORTERM=truecolor \
       NEIGE_TIE_TO_PARENT="${NEIGE_TIE_TO_PARENT:-1}" \
       ./target/release/neige-server \
         --port 3131 \
