@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { writeClipboard } from './clipboard';
+import { writeClipboard, writeClipboardSync } from './clipboard';
 
 // These tests lock in the BRANCHING of writeClipboard. The real failure modes
 // (Radix focus trap stealing focus from a fallback textarea, Chrome on HTTP
@@ -88,5 +88,28 @@ describe('writeClipboard', () => {
       (el) => el instanceof HTMLElement && el.tagName === 'SPAN',
     );
     expect(fallbackFocused).toBe(false);
+  });
+});
+
+describe('writeClipboardSync', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('uses selection copy immediately in an insecure context', () => {
+    vi.stubGlobal('isSecureContext', false);
+    vi.stubGlobal('navigator', {});
+    let copied = '';
+    spyExec((cmd) => {
+      if (cmd === 'copy') {
+        copied = window.getSelection()?.toString() ?? '';
+        return true;
+      }
+      return false;
+    });
+
+    expect(writeClipboardSync('from-osc52')).toBe(true);
+    expect(copied).toBe('from-osc52');
   });
 });
