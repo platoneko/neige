@@ -45,6 +45,7 @@ async fn cache_control_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn cache_control_for_assets_is_immutable() {
@@ -85,6 +86,63 @@ mod tests {
             "public, max-age=31536000, immutable"
         );
     }
+
+    #[test]
+    fn collect_tailscale_sockets_always_includes_default() {
+        let got = collect_tailscale_sockets(&[], None);
+        assert_eq!(got, vec![None]);
+    }
+
+    #[test]
+    fn collect_tailscale_sockets_merges_cli_and_env_deduped() {
+        let cli = vec![
+            PathBuf::from("/run/tailscale-neko/tailscaled.sock"),
+            PathBuf::from("/run/a.sock"),
+        ];
+        // env uses the platform path-list separator via join_paths
+        let env = std::env::join_paths([
+            PathBuf::from("/run/a.sock"), // dup of cli
+            PathBuf::from("/home/me/.config/tailscale-plat/sock"),
+        ])
+        .unwrap();
+        let env_str = env.to_string_lossy();
+        let got = collect_tailscale_sockets(&cli, Some(&env_str));
+        assert_eq!(
+            got,
+            vec![
+                None,
+                Some(PathBuf::from("/run/tailscale-neko/tailscaled.sock")),
+                Some(PathBuf::from("/run/a.sock")),
+                Some(PathBuf::from("/home/me/.config/tailscale-plat/sock")),
+            ]
+        );
+    }
+
+    #[test]
+    fn origins_from_status_json_ips_dns_hostname() {
+        let json = serde_json::json!({
+            "Self": {
+                "TailscaleIPs": ["100.93.210.104", "fd7a:115c:a1e0::bb34:d269"],
+                "DNSName": "pivot-home.tail090ab2.ts.net.",
+                "HostName": "pivot-home"
+            }
+        });
+        let got = origins_from_tailscale_status_json(&json, 3131);
+        assert!(got.contains(&"http://100.93.210.104".into()));
+        assert!(got.contains(&"http://100.93.210.104:3131".into()));
+        assert!(got.contains(&"http://[fd7a:115c:a1e0::bb34:d269]".into()));
+        assert!(got.contains(&"http://[fd7a:115c:a1e0::bb34:d269]:3131".into()));
+        assert!(got.contains(&"http://pivot-home.tail090ab2.ts.net".into()));
+        assert!(got.contains(&"http://pivot-home.tail090ab2.ts.net:3131".into()));
+        assert!(got.contains(&"http://pivot-home".into()));
+        assert!(got.contains(&"http://pivot-home:3131".into()));
+    }
+
+    #[test]
+    fn origins_from_status_json_empty_self() {
+        let json = serde_json::json!({"Self": {}});
+        assert!(origins_from_tailscale_status_json(&json, 3030).is_empty());
+    }
 }
 
 #[derive(Parser)]
@@ -115,6 +173,13 @@ struct Cli {
     /// origin check without listing each host. Can be repeated.
     #[arg(long = "allowed-cidr")]
     allowed_cidrs: Vec<String>,
+
+    /// Extra Tailscale daemon socket to probe for auto-detected origins
+    /// (in addition to the default `tailscale` socket). Use when multiple
+    /// `tailscaled` instances share the host. Can be repeated. Also accepts
+    /// `NEIGE_TAILSCALE_SOCKETS` (path-list separator, e.g. `:` on Unix).
+    #[arg(long = "tailscale-socket", value_name = "PATH")]
+    tailscale_sockets: Vec<std::path::PathBuf>,
 
     /// Disable authentication entirely (DEV ONLY — forces --listen 127.0.0.1)
     #[arg(long)]
@@ -291,28 +356,39 @@ fn rotate_token(path: &std::path::Path) -> std::io::Result<String> {
     Ok(token)
 }
 
-/// Shell out to `tailscale status --json` and synthesize origin URLs for this
-/// node's Tailscale identities (IPs, MagicDNS FQDN, short hostname), each with
-/// and without `:<port>`. Silent no-op if tailscale is missing or slow.
-async fn detect_tailscale_origins(port: u16) -> Vec<String> {
-    let output_res = tokio::time::timeout(
-        std::time::Duration::from_millis(800),
-        tokio::process::Command::new("tailscale")
-            .args(["status", "--json"])
-            .output(),
-    )
-    .await;
+/// Build the list of Tailscale sockets to probe: always the default daemon
+/// (`None` → CLI uses its built-in socket), then extra paths from CLI flags
+/// and `NEIGE_TAILSCALE_SOCKETS`. Duplicates are dropped, order preserved.
+fn collect_tailscale_sockets(
+    cli_sockets: &[std::path::PathBuf],
+    env_sockets: Option<&str>,
+) -> Vec<Option<std::path::PathBuf>> {
+    let mut out: Vec<Option<std::path::PathBuf>> = vec![None];
+    let mut seen = std::collections::HashSet::new();
 
-    let output = match output_res {
-        Ok(Ok(o)) if o.status.success() => o,
-        _ => return Vec::new(),
+    let mut push_path = |p: std::path::PathBuf| {
+        if p.as_os_str().is_empty() {
+            return;
+        }
+        if seen.insert(p.clone()) {
+            out.push(Some(p));
+        }
     };
 
-    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+    for p in cli_sockets {
+        push_path(p.clone());
+    }
+    if let Some(env) = env_sockets {
+        for p in std::env::split_paths(env) {
+            push_path(p);
+        }
+    }
+    out
+}
 
+/// Parse `tailscale status --json` Self identities into origin URLs (with and
+/// without `:<port>`). Pure helper so unit tests don't need a live daemon.
+fn origins_from_tailscale_status_json(json: &serde_json::Value, port: u16) -> Vec<String> {
     let mut hosts: Vec<String> = Vec::new();
     if let Some(ips) = json.pointer("/Self/TailscaleIPs").and_then(|v| v.as_array()) {
         for ip in ips.iter().filter_map(|v| v.as_str()) {
@@ -339,6 +415,58 @@ async fn detect_tailscale_origins(port: u16) -> Vec<String> {
     for h in hosts {
         origins.push(format!("http://{h}"));
         origins.push(format!("http://{h}:{port}"));
+    }
+    origins
+}
+
+/// One socket probe: `tailscale [--socket PATH] status --json`, 800ms timeout.
+/// Missing binary, dead socket, timeout, or bad JSON → empty (silent).
+async fn query_tailscale_status_json(socket: Option<&std::path::Path>) -> Option<serde_json::Value> {
+    let mut cmd = tokio::process::Command::new("tailscale");
+    if let Some(path) = socket {
+        cmd.arg("--socket").arg(path);
+    }
+    cmd.args(["status", "--json"]);
+
+    let output_res = tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        cmd.output(),
+    )
+    .await;
+
+    let output = match output_res {
+        Ok(Ok(o)) if o.status.success() => o,
+        _ => return None,
+    };
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Shell out to `tailscale status --json` on each candidate socket and
+/// synthesize origin URLs for that node's identities (IPs, MagicDNS FQDN,
+/// short hostname), each with and without `:<port>`. Always probes the
+/// default socket; extra sockets come from `--tailscale-socket` /
+/// `NEIGE_TAILSCALE_SOCKETS`. Silent no-op per socket if missing or slow.
+async fn detect_tailscale_origins(
+    port: u16,
+    extra_sockets: &[std::path::PathBuf],
+) -> Vec<String> {
+    let env_sockets = std::env::var("NEIGE_TAILSCALE_SOCKETS").ok();
+    let sockets = collect_tailscale_sockets(extra_sockets, env_sockets.as_deref());
+
+    let futs = sockets.into_iter().map(|sock| async move {
+        let json = query_tailscale_status_json(sock.as_deref()).await?;
+        Some(origins_from_tailscale_status_json(&json, port))
+    });
+    let results = futures::future::join_all(futs).await;
+
+    let mut origins = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for batch in results.into_iter().flatten() {
+        for o in batch {
+            if seen.insert(o.clone()) {
+                origins.push(o);
+            }
+        }
     }
     origins
 }
@@ -426,11 +554,12 @@ async fn main() {
         .to_string_lossy()
         .to_string();
 
-    // Merge CLI-supplied origins with any we can auto-detect from the local
-    // Tailscale daemon. Users on tailnets otherwise hit a 403 on any non-
-    // loopback access.
+    // Merge CLI-supplied origins with any we can auto-detect from local
+    // Tailscale daemon(s). Users on tailnets otherwise hit a 403 on any
+    // non-loopback access. Default socket is always probed; extra instances
+    // are opt-in via --tailscale-socket / NEIGE_TAILSCALE_SOCKETS.
     let mut allowed_origins = cli.allowed_origins.clone();
-    let ts_origins = detect_tailscale_origins(cli.port).await;
+    let ts_origins = detect_tailscale_origins(cli.port, &cli.tailscale_sockets).await;
     if !ts_origins.is_empty() {
         eprintln!("Detected Tailscale origins: {}", ts_origins.join(", "));
         allowed_origins.extend(ts_origins);
