@@ -136,8 +136,41 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     // the newer pending payload, and must not drop text if we optimistically
     // cleared before knowing the write failed.
     let pendingOsc52: string | null = null;
-    const flushPendingOsc52 = () => {
+    /**
+     * Attempt to land a staged OSC 52 copy under a real user gesture.
+     *
+     * `selectionCopy` mutates `window.getSelection()` — doing that on a
+     * keydown that was meant to start (or continue) a CJK IME composition
+     * cancels the IME, which shows up as "can only type English / 中文输入法
+     * 出不来" right after Grok/nvim copies something over plain HTTP (where
+     * the async Clipboard API is unavailable and we rely on the selection
+     * fallback). So:
+     *   - keyboard events never run selectionCopy
+     *   - composition keys (isComposing / keyCode 229) are a hard no-op
+     *   - pointer events get the full sync path (selection + execCommand)
+     * Keyboard on https still tries the Clipboard API; if that fails the
+     * payload stays staged for the next click.
+     */
+    const flushPendingOsc52 = (e: Event) => {
       if (pendingOsc52 === null) return;
+
+      if (e instanceof KeyboardEvent) {
+        // Mid-composition or the "composition character" key — do not touch
+        // selection or even fire async clipboard; leave pending for later.
+        if (e.isComposing || e.keyCode === 229) return;
+        // https only: writeClipboard already gates on isSecureContext and
+        // falls back carefully. Never call writeClipboardSync/selectionCopy
+        // from a key event — that mutates Selection and cancels IME.
+        const text = pendingOsc52;
+        if (window.isSecureContext) {
+          void writeClipboard(text).then((ok) => {
+            if (ok && pendingOsc52 === text) pendingOsc52 = null;
+          });
+        }
+        return;
+      }
+
+      // Pointer (or any non-keyboard gesture): full sync path.
       const text = pendingOsc52;
       // Clear first so a nested event during copy can't re-enter forever.
       pendingOsc52 = null;
@@ -148,15 +181,16 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         if (!ok && pendingOsc52 === null) pendingOsc52 = text;
       });
     };
-    const onGestureForClipboard = () => {
-      flushPendingOsc52();
+    const onGestureForClipboard = (e: Event) => {
+      flushPendingOsc52(e);
     };
     // Document capture: Grok's toast is in-terminal (no browser click), so
-    // the next keystroke or any click on the page — including chrome outside
-    // the xterm node — has to re-enter with transient activation.
-    // keyup/pointerup cover the case where activation is only granted on
-    // release in some browsers, and catch gestures that started before the
-    // OSC frame arrived over the WS.
+    // the next gesture on the page — including chrome outside the xterm
+    // node — has to re-enter with transient activation. Pointer is the
+    // reliable path for the selection-based fallback; keyboard only tries
+    // the Clipboard API (see flushPendingOsc52). keyup/pointerup cover
+    // browsers that grant activation on release, and catch gestures that
+    // started before the OSC frame arrived over the WS.
     const gestureOpts: AddEventListenerOptions = { capture: true };
     for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
       document.addEventListener(evt, onGestureForClipboard, gestureOpts);
@@ -172,17 +206,17 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       try {
         const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);
-        // Stage before attempting write so a slow async failure can't race
-        // past a newer copy, and so a denied write still has something to
-        // flush on the next gesture.
+        // Stage first. On insecure HTTP, selectionCopy here has no user
+        // gesture (almost always fails) and — worse — mutates Selection
+        // while the user may be mid-IME-composition, which cancels CJK
+        // input. Only the async Clipboard API is safe to fire without a
+        // gesture; the selection fallback waits for pointer flush above.
         pendingOsc52 = text;
         if (window.isSecureContext) {
           void writeClipboard(text).then((ok) => {
             // Only clear if nothing newer has replaced the pending payload.
             if (ok && pendingOsc52 === text) pendingOsc52 = null;
           });
-        } else if (writeClipboardSync(text)) {
-          pendingOsc52 = null;
         }
       } catch {
         /* malformed base64 */
