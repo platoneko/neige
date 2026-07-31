@@ -19,7 +19,8 @@
 //
 // OSC 52 from a TUI has no browser user-gesture at all. Callers that care
 // (the terminal core) should queue failed writes and retry on the next
-// keydown/pointerdown, which re-enters with transient activation.
+// user gesture. Prefer pointer for the selection-based path: running
+// selectionCopy on keydown mutates document Selection and cancels CJK IMEs.
 
 export async function writeClipboard(text: string): Promise<boolean> {
   if (window.isSecureContext && navigator.clipboard?.writeText) {
