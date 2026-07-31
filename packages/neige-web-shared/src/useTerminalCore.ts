@@ -158,14 +158,15 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         // Mid-composition or the "composition character" key — do not touch
         // selection or even fire async clipboard; leave pending for later.
         if (e.isComposing || e.keyCode === 229) return;
+        // https only: writeClipboard already gates on isSecureContext and
+        // falls back carefully. Never call writeClipboardSync/selectionCopy
+        // from a key event — that mutates Selection and cancels IME.
         const text = pendingOsc52;
-        if (window.isSecureContext && navigator.clipboard?.writeText) {
+        if (window.isSecureContext) {
           void writeClipboard(text).then((ok) => {
             if (ok && pendingOsc52 === text) pendingOsc52 = null;
           });
         }
-        // No selectionCopy on keyboard: mutating Selection here breaks IME
-        // activation for the very keystroke that triggered the flush.
         return;
       }
 
