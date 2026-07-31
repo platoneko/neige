@@ -86,7 +86,20 @@ cargo run -- --listen 0.0.0.0 --allowed-origin http://pivot.tail328551.ts.net --
 
 If not listed, the browser login will fail with `403 origin missing and referer not trusted` — even when the token is correct.
 
-**Tailscale is auto-detected.** On startup neige runs `tailscale status --json` and adds the node's Tailscale IPs, MagicDNS FQDN, and short hostname to the allowlist (with and without `:<port>`). If `tailscale` isn't installed or returns nothing, this is silently skipped.
+**Tailscale is auto-detected.** On startup neige runs `tailscale status --json` against the default daemon socket and adds that node's Tailscale IPs, MagicDNS FQDN, and short hostname to the allowlist (with and without `:<port>`). If `tailscale` isn't installed or returns nothing, this is silently skipped.
+
+**Multiple `tailscaled` instances** (e.g. a second userspace or dual-instance setup) are *not* hard-coded. Point neige at their sockets explicitly:
+
+```bash
+# CLI (repeatable)
+neige-server --tailscale-socket /run/tailscale-neko/tailscaled.sock \
+             --tailscale-socket ~/.config/tailscale-plat/sock
+
+# or env (path-list separator: `:` on Unix, `;` on Windows)
+export NEIGE_TAILSCALE_SOCKETS=/run/tailscale-neko/tailscaled.sock:$HOME/.config/tailscale-plat/sock
+```
+
+Each extra socket is probed in parallel with the same silent-on-failure rules. Deploy-specific topology stays in the unit / env; the binary only provides the generic hook.
 
 ### CLI flags
 
@@ -95,6 +108,8 @@ If not listed, the browser login will fail with `403 origin missing and referer 
 | `--port <N>` | `3030` | Listen port |
 | `--listen <ADDR>` | `127.0.0.1` | Listen address (use `0.0.0.0` for LAN) |
 | `--allowed-origin <URL>` | — | Additional allowed Origin (repeatable); loopback is always allowed |
+| `--allowed-cidr <CIDR>` | — | Trust any http(s) origin whose host is an IP in this CIDR (repeatable) |
+| `--tailscale-socket <PATH>` | — | Extra Tailscale daemon socket to probe for origins (repeatable); also `NEIGE_TAILSCALE_SOCKETS` |
 | `--no-auth` | off | Disable auth entirely (DEV ONLY, forces `--listen 127.0.0.1`) |
 | `--auth-file <PATH>` | `~/.config/neige/auth.json` | Override auth file location |
 
