@@ -21,7 +21,45 @@
 // (the terminal core) should queue failed writes and retry on the next
 // user gesture. Prefer pointer for the selection-based path: running
 // selectionCopy on keydown mutates document Selection and cancels CJK IMEs.
+// Even on pointer, selectionCopy while an IME host (xterm textarea) is
+// focused leaves the IME dead until a focus cycle — so terminal/OSC paths
+// use writeClipboardApiOnly and only selection-copy from page chrome.
 
+/** True when focus is on an element that hosts CJK IME composition. */
+export function isImeHostFocused(): boolean {
+  const ae = document.activeElement;
+  if (!ae || !(ae instanceof HTMLElement)) return false;
+  if (ae instanceof HTMLTextAreaElement || ae instanceof HTMLInputElement) {
+    return true;
+  }
+  if (ae.isContentEditable) return true;
+  // xterm.js input surface
+  if (ae.classList.contains('xterm-helper-textarea')) return true;
+  return false;
+}
+
+/**
+ * Clipboard API only — never mutates document Selection.
+ * Safe to call from keyboard handlers and OSC 52 arrival (no user gesture).
+ * Returns false on insecure contexts, missing API, or rejection.
+ */
+export async function writeClipboardApiOnly(text: string): Promise<boolean> {
+  if (!window.isSecureContext || !navigator.clipboard?.writeText) {
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Preferred for UI buttons/menus: Clipboard API when secure, else selection
+ * fallback. Not safe mid-IME-composition (selection fallback mutates
+ * Selection) — use writeClipboardApiOnly from terminal/OSC paths.
+ */
 export async function writeClipboard(text: string): Promise<boolean> {
   if (window.isSecureContext && navigator.clipboard?.writeText) {
     try {
@@ -46,6 +84,9 @@ export async function writeClipboard(text: string): Promise<boolean> {
  * On https we still kick `writeText` in parallel: some browsers honor a
  * sticky clipboard permission without going through selection, and the
  * extra write is harmless when selectionCopy already worked.
+ *
+ * Refuses to run selectionCopy while an IME host is focused (returns false
+ * without mutating Selection) so callers can keep text staged.
  */
 export function writeClipboardSync(text: string): boolean {
   if (window.isSecureContext && navigator.clipboard?.writeText) {
@@ -57,6 +98,11 @@ export function writeClipboardSync(text: string): boolean {
 }
 
 function selectionCopy(text: string): boolean {
+  // Mutating Selection while a textarea/input hosts IME composition (or even
+  // just has focus, for some fcitx/Chromium combos) cancels CJK input until
+  // the next focus cycle. Skip rather than break the terminal.
+  if (isImeHostFocused()) return false;
+
   const selection = window.getSelection();
   // Preserve any selection the user had so we don't trash it on failure.
   const savedRanges: Range[] = [];

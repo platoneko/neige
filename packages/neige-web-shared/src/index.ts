@@ -47,4 +47,9 @@ export type {
   UseTerminalCoreApi,
   TerminalStatus,
 } from './useTerminalCore';
-export { writeClipboard, writeClipboardSync } from './clipboard';
+export {
+  writeClipboard,
+  writeClipboardSync,
+  writeClipboardApiOnly,
+  isImeHostFocused,
+} from './clipboard';
