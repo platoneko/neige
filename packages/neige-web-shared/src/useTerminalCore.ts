@@ -3,11 +3,7 @@ import type { RefObject } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { ITheme, ITerminalOptions } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import {
-  isImeHostFocused,
-  writeClipboardApiOnly,
-  writeClipboardSync,
-} from './clipboard';
+import { writeClipboardApiOnly, writeClipboardSync } from './clipboard';
 
 /**
  * Shared WS framing contract (see crates/neige-server/src/api/ws.rs handle_ws):
@@ -136,51 +132,57 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     //
     // Always stage first, then clear only on confirmed success: an async
     // Clipboard API denial that arrives after a later copy must not clobber
-    // the newer pending payload. Terminal/keyboard paths use
-    // writeClipboardApiOnly only — selectionCopy mutates Selection and
-    // kills CJK IME until the next focus cycle.
+    // the newer pending payload.
+    //
+    // HTTP has no Clipboard API, so the only way to land OSC 52 is
+    // selectionCopy under a real pointer gesture. That path must not run
+    // on keydown / mid-composition (kills CJK IME). On pointer we use
+    // yieldImeHost (blur xterm textarea → copy → restore focus) so HTTP
+    // copy still works without leaving Selection desynced on a focused
+    // IME host — which is what made "clipboard unreachable" after the
+    // terminal-pointer-is-API-only experiment.
     let pendingOsc52: string | null = null;
+    let imeComposing = false;
+    const onCompositionStart = () => {
+      imeComposing = true;
+    };
+    const onCompositionEnd = () => {
+      imeComposing = false;
+    };
+    document.addEventListener('compositionstart', onCompositionStart, true);
+    document.addEventListener('compositionend', onCompositionEnd, true);
+
     /**
      * Attempt to land a staged OSC 52 copy under a real user gesture.
      *
-     * `selectionCopy` mutates `window.getSelection()`. Doing that on a
-     * keydown, or on a pointer event while the xterm textarea is focused,
-     * cancels CJK IME composition ("can only type English") until the next
-     * focus cycle. Rules:
-     *   - keyboard: Clipboard API only (never selection); composition keys
-     *     (isComposing / keyCode 229) are a hard no-op
-     *   - pointer inside the terminal / IME host focused: Clipboard API only
-     *   - pointer on page chrome (sidebar, etc.): selection sync fallback OK
-     * Failed writes leave the payload staged for a later chrome click.
+     *   - keyboard / mid-composition: Clipboard API only (never selection)
+     *   - pointer (anywhere, including terminal): selection sync with
+     *     yieldImeHost so plain HTTP still copies
+     * Failed writes leave the payload staged for a later gesture.
      */
     const flushPendingOsc52 = (e: Event) => {
       if (pendingOsc52 === null) return;
       const text = pendingOsc52;
 
       if (e instanceof KeyboardEvent) {
-        if (e.isComposing || e.keyCode === 229) return;
+        if (e.isComposing || e.keyCode === 229 || imeComposing) return;
         void writeClipboardApiOnly(text).then((ok) => {
           if (ok && pendingOsc52 === text) pendingOsc52 = null;
         });
         return;
       }
 
-      const target = e.target;
-      const inTerminal =
-        target instanceof Element &&
-        !!target.closest('.xterm, .terminal-container, .term-host');
-
-      // Terminal interaction or IME host focused: never touch Selection.
-      if (inTerminal || isImeHostFocused()) {
+      // Pointer during active IME composition: don't interrupt candidates.
+      if (imeComposing) {
         void writeClipboardApiOnly(text).then((ok) => {
           if (ok && pendingOsc52 === text) pendingOsc52 = null;
         });
         return;
       }
 
-      // Chrome click outside the terminal: selection fallback is safe.
+      // Clear first so a nested event during copy can't re-enter forever.
       pendingOsc52 = null;
-      if (writeClipboardSync(text)) return;
+      if (writeClipboardSync(text, { yieldImeHost: true })) return;
       void writeClipboardApiOnly(text).then((ok) => {
         if (!ok && pendingOsc52 === null) pendingOsc52 = text;
       });
@@ -190,9 +192,11 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     };
     // Document capture: Grok's toast is in-terminal (no browser click), so
     // the next gesture on the page — including chrome outside the xterm
-    // node — has to re-enter with transient activation. Selection fallback
-    // only runs for chrome clicks; terminal pointers stay API-only.
-    // keyup/pointerup cover browsers that grant activation on release.
+    // node — has to re-enter with transient activation. Pointer uses the
+    // selection fallback (with IME-host yield); keyboard only tries the
+    // Clipboard API. keyup/pointerup cover browsers that grant activation
+    // on release, and catch gestures that started before the OSC frame
+    // arrived over the WS.
     const gestureOpts: AddEventListenerOptions = { capture: true };
     for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
       document.addEventListener(evt, onGestureForClipboard, gestureOpts);
@@ -208,9 +212,8 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       try {
         const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);
-        // Stage first. Never selectionCopy here — no user gesture, and
-        // mutates Selection mid-IME. Clipboard API only; fallback waits
-        // for a chrome pointer flush above.
+        // Stage first. Never selectionCopy here — no user gesture.
+        // Clipboard API only on arrival; selection waits for pointer flush.
         pendingOsc52 = text;
         void writeClipboardApiOnly(text).then((ok) => {
           if (ok && pendingOsc52 === text) pendingOsc52 = null;
@@ -487,6 +490,8 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       if (fitRaf2) cancelAnimationFrame(fitRaf2);
       window.removeEventListener('resize', onWindowResize);
       document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('compositionstart', onCompositionStart, true);
+      document.removeEventListener('compositionend', onCompositionEnd, true);
       for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
         document.removeEventListener(evt, onGestureForClipboard, gestureOpts);
       }
