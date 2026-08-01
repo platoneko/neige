@@ -51,5 +51,7 @@ export {
   writeClipboard,
   writeClipboardSync,
   writeClipboardApiOnly,
+  eventCopy,
   isImeHostFocused,
 } from './clipboard';
+export type { SelectionCopyOptions } from './clipboard';
