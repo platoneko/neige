@@ -1,22 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  eventCopy,
   isImeHostFocused,
   writeClipboard,
   writeClipboardApiOnly,
   writeClipboardSync,
 } from './clipboard';
 
-// These tests lock in the BRANCHING of writeClipboard. The real failure modes
-// (Radix focus trap stealing focus from a fallback textarea, Chrome on HTTP
-// rejecting writeText asynchronously past the user gesture) only reproduce in
-// a real browser — verify those on the device. Here we just make sure:
-//   - secure context + async API present → use the async API
-//   - insecure context (HTTP) → SKIP the async API entirely (no microtask gap)
-//   - async API rejects → fall back to selection-based copy
-//   - the selection-based fallback selects the right text on the document
-//   - writeClipboardApiOnly never mutates Selection
-//   - selectionCopy refuses while an IME host is focused (default)
-//   - yieldImeHost blurs → copies → restores focus
+// Branching tests for clipboard helpers. Real browser gesture / IME
+// interaction still needs a manual check on the device.
 
 function spyExec(impl: (cmd: string) => boolean) {
   if (typeof document.execCommand !== 'function') {
@@ -46,16 +38,62 @@ describe('writeClipboard', () => {
   });
 
   it('skips the async API entirely in an insecure context (HTTP)', async () => {
-    // Chrome over HTTP still exposes navigator.clipboard.writeText, but it
-    // rejects async. If we await it we lose the user-gesture window. Guard
-    // on isSecureContext and go straight to the synchronous fallback.
     vi.stubGlobal('isSecureContext', false);
     const writeText = vi.fn().mockRejectedValue(new Error('insecure'));
     vi.stubGlobal('navigator', { clipboard: { writeText } });
-    let copiedSelection = '';
+    let viaEvent = '';
     const exec = spyExec((cmd) => {
       if (cmd === 'copy') {
-        copiedSelection = window.getSelection()?.toString() ?? '';
+        // Simulate browser firing the copy event for eventCopy.
+        document.dispatchEvent(
+          new ClipboardEvent('copy', {
+            clipboardData: new DataTransfer(),
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        return true;
+      }
+      return false;
+    });
+    // Real eventCopy listens for copy; wire DataTransfer through a spy.
+    const setData = vi.fn();
+    vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
+      if (type === 'copy' && typeof handler === 'function') {
+        const e = {
+          clipboardData: { setData },
+          preventDefault: vi.fn(),
+        };
+        // call handler when execCommand runs
+        spyExec((cmd) => {
+          if (cmd === 'copy') {
+            (handler as (ev: unknown) => void)(e);
+            viaEvent = 'ok';
+            return true;
+          }
+          return false;
+        });
+      }
+    });
+
+    // Simpler path: mock eventCopy success by making exec + handler work
+    vi.restoreAllMocks();
+    vi.stubGlobal('isSecureContext', false);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const setData2 = vi.fn();
+    document.addEventListener = vi.fn((type: string, handler: EventListener) => {
+      if (type === 'copy') {
+        (document as unknown as { __copyHandler?: EventListener }).__copyHandler = handler;
+      }
+    }) as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
+    spyExec((cmd) => {
+      if (cmd === 'copy') {
+        const h = (document as unknown as { __copyHandler?: EventListener }).__copyHandler;
+        h?.({
+          clipboardData: { setData: setData2 },
+          preventDefault: () => {},
+        } as unknown as Event);
         return true;
       }
       return false;
@@ -63,39 +101,75 @@ describe('writeClipboard', () => {
 
     await expect(writeClipboard('relative/path.ts')).resolves.toBe(true);
     expect(writeText).not.toHaveBeenCalled();
-    expect(exec).toHaveBeenCalledWith('copy');
-    expect(copiedSelection).toBe('relative/path.ts');
+    expect(setData2).toHaveBeenCalledWith('text/plain', 'relative/path.ts');
+    void viaEvent;
+    void exec;
   });
 
-  it('falls back to selection copy when writeText rejects in a secure context', async () => {
+  it('falls back when writeText rejects in a secure context', async () => {
     const writeText = vi.fn().mockRejectedValue(new Error('denied'));
     vi.stubGlobal('navigator', { clipboard: { writeText } });
-    const exec = spyExec(() => true);
+    const setData = vi.fn();
+    document.addEventListener = vi.fn((type: string, handler: EventListener) => {
+      if (type === 'copy') {
+        (document as unknown as { __copyHandler?: EventListener }).__copyHandler = handler;
+      }
+    }) as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
+    spyExec((cmd) => {
+      if (cmd === 'copy') {
+        const h = (document as unknown as { __copyHandler?: EventListener }).__copyHandler;
+        h?.({
+          clipboardData: { setData },
+          preventDefault: () => {},
+        } as unknown as Event);
+        return true;
+      }
+      return false;
+    });
 
     await expect(writeClipboard('x')).resolves.toBe(true);
     expect(writeText).toHaveBeenCalled();
-    expect(exec).toHaveBeenCalledWith('copy');
+    expect(setData).toHaveBeenCalledWith('text/plain', 'x');
+  });
+});
+
+describe('eventCopy', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it('selection fallback uses Range over an off-screen span, not a focused input', async () => {
-    // The whole point of the selection-API fallback is that it survives Radix
-    // FocusScope: nothing in the page needs to be focused.
-    vi.stubGlobal('isSecureContext', false);
-    vi.stubGlobal('navigator', {});
-    spyExec(() => true);
+  it('supplies text via the copy event without touching Selection', () => {
+    const setData = vi.fn();
+    const removeSpy = vi.spyOn(Selection.prototype, 'removeAllRanges');
+    document.addEventListener = vi.fn((type: string, handler: EventListener) => {
+      if (type === 'copy') {
+        (document as unknown as { __h?: EventListener }).__h = handler;
+      }
+    }) as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
+    spyExec((cmd) => {
+      if (cmd === 'copy') {
+        (document as unknown as { __h?: EventListener }).__h?.({
+          clipboardData: { setData },
+          preventDefault: () => {},
+        } as unknown as Event);
+        return true;
+      }
+      return false;
+    });
 
-    const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus');
-    await writeClipboard('absolute');
+    expect(eventCopy('hello-osc')).toBe(true);
+    expect(setData).toHaveBeenCalledWith('text/plain', 'hello-osc');
+    expect(removeSpy).not.toHaveBeenCalled();
+  });
 
-    // The fallback element should be a span, and we should never have called
-    // focus() on it. (Saved-selection restoration may still focus other
-    // elements; we only care that we don't depend on focus.)
-    const spansCreatedAndRemoved = !document.querySelector('span'); // cleaned up
-    expect(spansCreatedAndRemoved).toBe(true);
-    const fallbackFocused = focusSpy.mock.instances.some(
-      (el) => el instanceof HTMLElement && el.tagName === 'SPAN',
-    );
-    expect(fallbackFocused).toBe(false);
+  it('returns false when execCommand fails', () => {
+    document.addEventListener = vi.fn() as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
+    spyExec(() => false);
+    expect(eventCopy('nope')).toBe(false);
   });
 });
 
@@ -155,30 +229,54 @@ describe('isImeHostFocused / selectionCopy guard', () => {
     expect(isImeHostFocused()).toBe(true);
   });
 
-  it('writeClipboardSync refuses selectionCopy while a textarea is focused', () => {
+  it('writeClipboardSync prefers eventCopy even with textarea focused', () => {
     vi.stubGlobal('isSecureContext', false);
     vi.stubGlobal('navigator', {});
     const ta = document.createElement('textarea');
     document.body.appendChild(ta);
     ta.focus();
-    const exec = spyExec(() => true);
 
-    expect(writeClipboardSync('must-not-copy')).toBe(false);
-    expect(exec).not.toHaveBeenCalled();
+    const setData = vi.fn();
+    document.addEventListener = vi.fn((type: string, handler: EventListener) => {
+      if (type === 'copy') {
+        (document as unknown as { __h?: EventListener }).__h = handler;
+      }
+    }) as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
+    spyExec((cmd) => {
+      if (cmd === 'copy') {
+        (document as unknown as { __h?: EventListener }).__h?.({
+          clipboardData: { setData },
+          preventDefault: () => {},
+        } as unknown as Event);
+        return true;
+      }
+      return false;
+    });
+
+    expect(writeClipboardSync('from-terminal-pointer')).toBe(true);
+    expect(setData).toHaveBeenCalledWith('text/plain', 'from-terminal-pointer');
+    // Never blurred — focus stayed on the textarea.
+    expect(document.activeElement).toBe(ta);
   });
 
-  it('yieldImeHost blurs the host, copies, and restores focus', () => {
+  it('Range fallback with yieldImeHost blurs, copies, restores', () => {
     vi.stubGlobal('isSecureContext', false);
     vi.stubGlobal('navigator', {});
     const ta = document.createElement('textarea');
     document.body.appendChild(ta);
     ta.focus();
-    expect(document.activeElement).toBe(ta);
 
+    // Force eventCopy to fail so we hit selectionCopy.
+    document.addEventListener = vi.fn() as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
     let copied = '';
-    const exec = spyExec((cmd) => {
+    let phase = 0;
+    spyExec((cmd) => {
+      // first call is eventCopy → fail; second is selectionCopy → ok
       if (cmd === 'copy') {
-        // Host must have yielded focus for the selection path.
+        phase += 1;
+        if (phase === 1) return false;
         expect(document.activeElement).not.toBe(ta);
         copied = window.getSelection()?.toString() ?? '';
         return true;
@@ -186,11 +284,8 @@ describe('isImeHostFocused / selectionCopy guard', () => {
       return false;
     });
 
-    expect(writeClipboardSync('from-terminal-pointer', { yieldImeHost: true })).toBe(
-      true,
-    );
-    expect(exec).toHaveBeenCalledWith('copy');
-    expect(copied).toBe('from-terminal-pointer');
+    expect(writeClipboardSync('fallback', { yieldImeHost: true })).toBe(true);
+    expect(copied).toBe('fallback');
     expect(document.activeElement).toBe(ta);
   });
 });
@@ -202,49 +297,40 @@ describe('writeClipboardSync', () => {
     document.body.innerHTML = '';
   });
 
-  it('uses selection copy immediately in an insecure context', () => {
+  it('uses eventCopy in an insecure context', () => {
     vi.stubGlobal('isSecureContext', false);
     vi.stubGlobal('navigator', {});
-    let copied = '';
+    const setData = vi.fn();
+    document.addEventListener = vi.fn((type: string, handler: EventListener) => {
+      if (type === 'copy') {
+        (document as unknown as { __h?: EventListener }).__h = handler;
+      }
+    }) as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
     spyExec((cmd) => {
       if (cmd === 'copy') {
-        copied = window.getSelection()?.toString() ?? '';
+        (document as unknown as { __h?: EventListener }).__h?.({
+          clipboardData: { setData },
+          preventDefault: () => {},
+        } as unknown as Event);
         return true;
       }
       return false;
     });
 
     expect(writeClipboardSync('from-osc52')).toBe(true);
-    expect(copied).toBe('from-osc52');
+    expect(setData).toHaveBeenCalledWith('text/plain', 'from-osc52');
   });
 
-  it('reports selectionCopy result even in a secure context (no false ok)', () => {
-    // Fire-and-forget writeText must not make us claim success — OSC 52
-    // queueing needs a truthful boolean so a denied write stays pending.
+  it('reports failure when both eventCopy and selectionCopy fail', () => {
     vi.stubGlobal('isSecureContext', true);
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal('navigator', { clipboard: { writeText } });
+    document.addEventListener = vi.fn() as unknown as typeof document.addEventListener;
+    document.removeEventListener = vi.fn() as unknown as typeof document.removeEventListener;
     spyExec(() => false);
 
     expect(writeClipboardSync('held-for-gesture')).toBe(false);
     expect(writeText).toHaveBeenCalledWith('held-for-gesture');
-  });
-
-  it('returns true in a secure context when selectionCopy works', () => {
-    vi.stubGlobal('isSecureContext', true);
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal('navigator', { clipboard: { writeText } });
-    let copied = '';
-    spyExec((cmd) => {
-      if (cmd === 'copy') {
-        copied = window.getSelection()?.toString() ?? '';
-        return true;
-      }
-      return false;
-    });
-
-    expect(writeClipboardSync('synced')).toBe(true);
-    expect(copied).toBe('synced');
-    expect(writeText).toHaveBeenCalledWith('synced');
   });
 });

@@ -134,13 +134,10 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     // Clipboard API denial that arrives after a later copy must not clobber
     // the newer pending payload.
     //
-    // HTTP has no Clipboard API, so the only way to land OSC 52 is
-    // selectionCopy under a real pointer gesture. That path must not run
-    // on keydown / mid-composition (kills CJK IME). On pointer we use
-    // yieldImeHost (blur xterm textarea → copy → restore focus) so HTTP
-    // copy still works without leaving Selection desynced on a focused
-    // IME host — which is what made "clipboard unreachable" after the
-    // terminal-pointer-is-API-only experiment.
+    // HTTP has no Clipboard API. Land OSC 52 on the next user gesture via
+    // eventCopy (copy-event + execCommand — no Selection, no blur). That
+    // keeps CJK IME alive and still works over plain HTTP. Keyboard uses
+    // the same path only when not mid-composition.
     let pendingOsc52: string | null = null;
     let imeComposing = false;
     const onCompositionStart = () => {
@@ -155,10 +152,10 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     /**
      * Attempt to land a staged OSC 52 copy under a real user gesture.
      *
-     *   - keyboard / mid-composition: Clipboard API only (never selection)
-     *   - pointer (anywhere, including terminal): selection sync with
-     *     yieldImeHost so plain HTTP still copies
-     * Failed writes leave the payload staged for a later gesture.
+     *   - mid-composition: leave pending (don't interrupt candidates)
+     *   - otherwise: writeClipboardSync → eventCopy first, then selection
+     *     with yieldImeHost as last resort
+     * Failed writes re-stage the payload for a later gesture.
      */
     const flushPendingOsc52 = (e: Event) => {
       if (pendingOsc52 === null) return;
@@ -166,25 +163,18 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
 
       if (e instanceof KeyboardEvent) {
         if (e.isComposing || e.keyCode === 229 || imeComposing) return;
-        void writeClipboardApiOnly(text).then((ok) => {
-          if (ok && pendingOsc52 === text) pendingOsc52 = null;
-        });
-        return;
-      }
-
-      // Pointer during active IME composition: don't interrupt candidates.
-      if (imeComposing) {
-        void writeClipboardApiOnly(text).then((ok) => {
-          if (ok && pendingOsc52 === text) pendingOsc52 = null;
-        });
+      } else if (imeComposing) {
         return;
       }
 
       // Clear first so a nested event during copy can't re-enter forever.
       pendingOsc52 = null;
       if (writeClipboardSync(text, { yieldImeHost: true })) return;
+      // Sync path failed — re-stage for the next gesture. On https still
+      // try the async API (sticky grant); clear only if this payload wins.
+      pendingOsc52 = text;
       void writeClipboardApiOnly(text).then((ok) => {
-        if (!ok && pendingOsc52 === null) pendingOsc52 = text;
+        if (ok && pendingOsc52 === text) pendingOsc52 = null;
       });
     };
     const onGestureForClipboard = (e: Event) => {
@@ -192,11 +182,8 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     };
     // Document capture: Grok's toast is in-terminal (no browser click), so
     // the next gesture on the page — including chrome outside the xterm
-    // node — has to re-enter with transient activation. Pointer uses the
-    // selection fallback (with IME-host yield); keyboard only tries the
-    // Clipboard API. keyup/pointerup cover browsers that grant activation
-    // on release, and catch gestures that started before the OSC frame
-    // arrived over the WS.
+    // node — has to re-enter with transient activation. keyup/pointerup
+    // cover browsers that grant activation on release.
     const gestureOpts: AddEventListenerOptions = { capture: true };
     for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
       document.addEventListener(evt, onGestureForClipboard, gestureOpts);
