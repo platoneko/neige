@@ -745,6 +745,10 @@
   font-family: var(--font-sans);
 }
 
+/* Padding + chrome live on the outer view. FitAddon's parent is
+   .terminal-container and MUST stay padding:0 — border-box width includes
+   padding, but FitAddon does not subtract it, so padding on the fit parent
+   over-counts cols/rows and fullscreen TUIs (Grok) get clipped jagged edges. */
 .terminal-view {
   width: 100%;
   height: 100%;
@@ -752,6 +756,9 @@
   overflow: hidden;
   min-height: 0;
   position: relative;
+  padding: 6px 8px;
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
+  border-radius: 2px;
 }
 
 /* Empty right-side placeholder that keeps the default agent/files split
@@ -770,9 +777,7 @@
 
 .terminal-container {
   flex: 1;
-  padding: 6px 8px;
-  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
-  border-radius: 2px;
+  padding: 0;
   overflow: hidden;
   min-height: 0;
   min-width: 0;

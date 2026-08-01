@@ -3,7 +3,11 @@ import type { RefObject } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { ITheme, ITerminalOptions } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { writeClipboard, writeClipboardSync } from './clipboard';
+import {
+  isImeHostFocused,
+  writeClipboardApiOnly,
+  writeClipboardSync,
+} from './clipboard';
 
 /**
  * Shared WS framing contract (see crates/neige-server/src/api/ws.rs handle_ws):
@@ -121,8 +125,7 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
 
     // xterm.js drops OSC 52 by default, which silently breaks copy from
     // nvim/tmux/Grok inside the embedded terminal. Decode the base64 payload
-    // and forward it through `writeClipboard` (Clipboard API on https, or
-    // selection+execCommand on plain HTTP).
+    // and forward it through the clipboard helpers.
     //
     // OSC 52 arrives as PTY output over the WebSocket — by the time it hits
     // the browser the keypress that triggered the copy is long gone, so we
@@ -133,51 +136,52 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     //
     // Always stage first, then clear only on confirmed success: an async
     // Clipboard API denial that arrives after a later copy must not clobber
-    // the newer pending payload, and must not drop text if we optimistically
-    // cleared before knowing the write failed.
+    // the newer pending payload. Terminal/keyboard paths use
+    // writeClipboardApiOnly only — selectionCopy mutates Selection and
+    // kills CJK IME until the next focus cycle.
     let pendingOsc52: string | null = null;
     /**
      * Attempt to land a staged OSC 52 copy under a real user gesture.
      *
-     * `selectionCopy` mutates `window.getSelection()` — doing that on a
-     * keydown that was meant to start (or continue) a CJK IME composition
-     * cancels the IME, which shows up as "can only type English / 中文输入法
-     * 出不来" right after Grok/nvim copies something over plain HTTP (where
-     * the async Clipboard API is unavailable and we rely on the selection
-     * fallback). So:
-     *   - keyboard events never run selectionCopy
-     *   - composition keys (isComposing / keyCode 229) are a hard no-op
-     *   - pointer events get the full sync path (selection + execCommand)
-     * Keyboard on https still tries the Clipboard API; if that fails the
-     * payload stays staged for the next click.
+     * `selectionCopy` mutates `window.getSelection()`. Doing that on a
+     * keydown, or on a pointer event while the xterm textarea is focused,
+     * cancels CJK IME composition ("can only type English") until the next
+     * focus cycle. Rules:
+     *   - keyboard: Clipboard API only (never selection); composition keys
+     *     (isComposing / keyCode 229) are a hard no-op
+     *   - pointer inside the terminal / IME host focused: Clipboard API only
+     *   - pointer on page chrome (sidebar, etc.): selection sync fallback OK
+     * Failed writes leave the payload staged for a later chrome click.
      */
     const flushPendingOsc52 = (e: Event) => {
       if (pendingOsc52 === null) return;
+      const text = pendingOsc52;
 
       if (e instanceof KeyboardEvent) {
-        // Mid-composition or the "composition character" key — do not touch
-        // selection or even fire async clipboard; leave pending for later.
         if (e.isComposing || e.keyCode === 229) return;
-        // https only: writeClipboard already gates on isSecureContext and
-        // falls back carefully. Never call writeClipboardSync/selectionCopy
-        // from a key event — that mutates Selection and cancels IME.
-        const text = pendingOsc52;
-        if (window.isSecureContext) {
-          void writeClipboard(text).then((ok) => {
-            if (ok && pendingOsc52 === text) pendingOsc52 = null;
-          });
-        }
+        void writeClipboardApiOnly(text).then((ok) => {
+          if (ok && pendingOsc52 === text) pendingOsc52 = null;
+        });
         return;
       }
 
-      // Pointer (or any non-keyboard gesture): full sync path.
-      const text = pendingOsc52;
-      // Clear first so a nested event during copy can't re-enter forever.
+      const target = e.target;
+      const inTerminal =
+        target instanceof Element &&
+        !!target.closest('.xterm, .terminal-container, .term-host');
+
+      // Terminal interaction or IME host focused: never touch Selection.
+      if (inTerminal || isImeHostFocused()) {
+        void writeClipboardApiOnly(text).then((ok) => {
+          if (ok && pendingOsc52 === text) pendingOsc52 = null;
+        });
+        return;
+      }
+
+      // Chrome click outside the terminal: selection fallback is safe.
       pendingOsc52 = null;
       if (writeClipboardSync(text)) return;
-      // Still inside a user gesture: try the async path too (https with a
-      // sticky grant may succeed even when selection+execCommand refuses).
-      void writeClipboard(text).then((ok) => {
+      void writeClipboardApiOnly(text).then((ok) => {
         if (!ok && pendingOsc52 === null) pendingOsc52 = text;
       });
     };
@@ -186,11 +190,9 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     };
     // Document capture: Grok's toast is in-terminal (no browser click), so
     // the next gesture on the page — including chrome outside the xterm
-    // node — has to re-enter with transient activation. Pointer is the
-    // reliable path for the selection-based fallback; keyboard only tries
-    // the Clipboard API (see flushPendingOsc52). keyup/pointerup cover
-    // browsers that grant activation on release, and catch gestures that
-    // started before the OSC frame arrived over the WS.
+    // node — has to re-enter with transient activation. Selection fallback
+    // only runs for chrome clicks; terminal pointers stay API-only.
+    // keyup/pointerup cover browsers that grant activation on release.
     const gestureOpts: AddEventListenerOptions = { capture: true };
     for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
       document.addEventListener(evt, onGestureForClipboard, gestureOpts);
@@ -206,18 +208,13 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       try {
         const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);
-        // Stage first. On insecure HTTP, selectionCopy here has no user
-        // gesture (almost always fails) and — worse — mutates Selection
-        // while the user may be mid-IME-composition, which cancels CJK
-        // input. Only the async Clipboard API is safe to fire without a
-        // gesture; the selection fallback waits for pointer flush above.
+        // Stage first. Never selectionCopy here — no user gesture, and
+        // mutates Selection mid-IME. Clipboard API only; fallback waits
+        // for a chrome pointer flush above.
         pendingOsc52 = text;
-        if (window.isSecureContext) {
-          void writeClipboard(text).then((ok) => {
-            // Only clear if nothing newer has replaced the pending payload.
-            if (ok && pendingOsc52 === text) pendingOsc52 = null;
-          });
-        }
+        void writeClipboardApiOnly(text).then((ok) => {
+          if (ok && pendingOsc52 === text) pendingOsc52 = null;
+        });
       } catch {
         /* malformed base64 */
       }
@@ -225,11 +222,17 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     });
 
     // --- Resize pipeline ---
-    // Single debounced chain: container change → fit xterm → send PTY resize.
-    // 150ms debounce keeps SIGWINCH from flooding the PTY during drag resizes.
+    // Debounced container → fit xterm → send PTY resize. 150ms keeps
+    // SIGWINCH from flooding the PTY during drag resizes. Snapshot/open
+    // use a faster path + double rAF so dockview layout settling and
+    // async webfont metrics don't leave fullscreen TUIs (Grok) one cell
+    // short at the edges.
+    let disposed = false;
     let lastCols = 0;
     let lastRows = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    let fitRaf1 = 0;
+    let fitRaf2 = 0;
 
     const sendResize = (cols: number, rows: number) => {
       const ws = wsRef.current;
@@ -240,19 +243,45 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       }
     };
 
-    const scheduleFit = () => {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        const rect = container.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-        fit.fit();
-        const dims = fit.proposeDimensions();
-        if (dims && (dims.cols !== lastCols || dims.rows !== lastRows)) {
-          sendResize(dims.cols, dims.rows);
-        }
-      }, 150);
+    const runFit = (): boolean => {
+      if (disposed) return false;
+      const rect = container.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      fit.fit();
+      const dims = fit.proposeDimensions();
+      if (dims && (dims.cols !== lastCols || dims.rows !== lastRows)) {
+        sendResize(dims.cols, dims.rows);
+      }
+      return true;
     };
-    scheduleFitRef.current = scheduleFit;
+
+    /** After a layout-critical event, fit now and once more after paint. */
+    const fitWithSettle = () => {
+      runFit();
+      if (fitRaf1) cancelAnimationFrame(fitRaf1);
+      if (fitRaf2) cancelAnimationFrame(fitRaf2);
+      fitRaf1 = requestAnimationFrame(() => {
+        fitRaf1 = 0;
+        fitRaf2 = requestAnimationFrame(() => {
+          fitRaf2 = 0;
+          runFit();
+        });
+      });
+    };
+
+    const scheduleFit = (opts?: { immediate?: boolean }) => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      const delay = opts?.immediate ? 0 : 150;
+      resizeTimer = setTimeout(() => {
+        resizeTimer = undefined;
+        if (opts?.immediate) {
+          fitWithSettle();
+        } else {
+          runFit();
+        }
+      }, delay);
+    };
+    scheduleFitRef.current = () => scheduleFit();
 
     // --- Activity ---
     // Output volume used to drive a busy/idle indicator here: 500 B/s for 2s
@@ -299,9 +328,14 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         term.write(c.bytes);
       }
       // Remount + snapshot often lands before dockview has finished sizing
-      // the panel; refit so the PTY and xterm agree on cols/rows.
-      if (sawReset) scheduleFit();
+      // the panel; refit immediately + settle so PTY and xterm agree.
+      if (sawReset) scheduleFit({ immediate: true });
     };
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/ws/${sessionId}`;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
     const wireWs = (ws: WebSocket) => {
       ws.onmessage = (e) => {
@@ -367,10 +401,9 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
             attach_id: attachIdRef.current,
           }),
         );
-        // Push dimensions so the PTY matches what we render.
-        fit.fit();
-        const dims = fit.proposeDimensions();
-        if (dims) sendResize(dims.cols, dims.rows);
+        // Don't fit with a zero-size container (dockview mid-layout). The
+        // settle path retries after paint; RO also fires when size arrives.
+        scheduleFit({ immediate: true });
       };
 
       ws.onclose = (ev) => {
@@ -383,12 +416,6 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         scheduleReconnect();
       };
     };
-
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${location.host}/ws/${sessionId}`;
-    let disposed = false;
-    let reconnectAttempts = 0;
-    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
     const connect = () => {
       const ws = new WebSocket(wsUrl);
@@ -425,29 +452,40 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       }
     });
 
-    window.addEventListener('resize', scheduleFit);
-    const ro = new ResizeObserver(scheduleFit);
+    const onWindowResize = () => scheduleFit();
+    window.addEventListener('resize', onWindowResize);
+    const ro = new ResizeObserver(() => scheduleFit());
     ro.observe(container);
 
     // When this tab becomes visible, force a resize push even if our local
     // dimensions haven't changed — another client (e.g. phone) may have
     // shrunk the shared PTY while we were hidden, so the TUI's output is
     // now laid out for their size. Clearing lastCols/lastRows bypasses the
-    // "no-op if unchanged" short-circuit in scheduleFit.
+    // "no-op if unchanged" short-circuit in runFit.
     const onVisibility = () => {
       if (document.visibilityState !== 'visible') return;
       lastCols = 0;
       lastRows = 0;
-      scheduleFit();
+      scheduleFit({ immediate: true });
     };
     document.addEventListener('visibilitychange', onVisibility);
+
+    // Webfonts (JetBrains Mono) load async; first cell metrics may use a
+    // fallback face. Refit when fonts settle so cols/rows match glyphs.
+    if (document.fonts?.ready) {
+      void document.fonts.ready.then(() => {
+        if (!disposed) scheduleFit({ immediate: true });
+      });
+    }
 
     return () => {
       disposed = true;
       if (resizeTimer) clearTimeout(resizeTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('resize', scheduleFit);
+      if (fitRaf1) cancelAnimationFrame(fitRaf1);
+      if (fitRaf2) cancelAnimationFrame(fitRaf2);
+      window.removeEventListener('resize', onWindowResize);
       document.removeEventListener('visibilitychange', onVisibility);
       for (const evt of ['keydown', 'keyup', 'pointerdown', 'pointerup'] as const) {
         document.removeEventListener(evt, onGestureForClipboard, gestureOpts);

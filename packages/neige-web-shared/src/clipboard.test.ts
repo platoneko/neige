@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { writeClipboard, writeClipboardSync } from './clipboard';
+import {
+  isImeHostFocused,
+  writeClipboard,
+  writeClipboardApiOnly,
+  writeClipboardSync,
+} from './clipboard';
 
 // These tests lock in the BRANCHING of writeClipboard. The real failure modes
 // (Radix focus trap stealing focus from a fallback textarea, Chrome on HTTP
@@ -9,6 +14,8 @@ import { writeClipboard, writeClipboardSync } from './clipboard';
 //   - insecure context (HTTP) → SKIP the async API entirely (no microtask gap)
 //   - async API rejects → fall back to selection-based copy
 //   - the selection-based fallback selects the right text on the document
+//   - writeClipboardApiOnly never mutates Selection
+//   - selectionCopy refuses while an IME host is focused
 
 function spyExec(impl: (cmd: string) => boolean) {
   if (typeof document.execCommand !== 'function') {
@@ -91,10 +98,80 @@ describe('writeClipboard', () => {
   });
 });
 
+describe('writeClipboardApiOnly', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('writes via Clipboard API and never calls execCommand', async () => {
+    vi.stubGlobal('isSecureContext', true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const exec = spyExec(() => true);
+
+    await expect(writeClipboardApiOnly('osc-payload')).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith('osc-payload');
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('returns false in an insecure context without touching Selection', async () => {
+    vi.stubGlobal('isSecureContext', false);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const exec = spyExec(() => true);
+    const removeSpy = vi.spyOn(Selection.prototype, 'removeAllRanges');
+
+    await expect(writeClipboardApiOnly('nope')).resolves.toBe(false);
+    expect(writeText).not.toHaveBeenCalled();
+    expect(exec).not.toHaveBeenCalled();
+    expect(removeSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns false when writeText rejects (no selection fallthrough)', async () => {
+    vi.stubGlobal('isSecureContext', true);
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const exec = spyExec(() => true);
+
+    await expect(writeClipboardApiOnly('denied')).resolves.toBe(false);
+    expect(writeText).toHaveBeenCalled();
+    expect(exec).not.toHaveBeenCalled();
+  });
+});
+
+describe('isImeHostFocused / selectionCopy guard', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    document.body.innerHTML = '';
+  });
+
+  it('detects textarea focus as an IME host', () => {
+    const ta = document.createElement('textarea');
+    document.body.appendChild(ta);
+    ta.focus();
+    expect(isImeHostFocused()).toBe(true);
+  });
+
+  it('writeClipboardSync refuses selectionCopy while a textarea is focused', () => {
+    vi.stubGlobal('isSecureContext', false);
+    vi.stubGlobal('navigator', {});
+    const ta = document.createElement('textarea');
+    document.body.appendChild(ta);
+    ta.focus();
+    const exec = spyExec(() => true);
+
+    expect(writeClipboardSync('must-not-copy')).toBe(false);
+    expect(exec).not.toHaveBeenCalled();
+  });
+});
+
 describe('writeClipboardSync', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    document.body.innerHTML = '';
   });
 
   it('uses selection copy immediately in an insecure context', () => {
