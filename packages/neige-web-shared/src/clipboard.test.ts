@@ -15,7 +15,8 @@ import {
 //   - async API rejects → fall back to selection-based copy
 //   - the selection-based fallback selects the right text on the document
 //   - writeClipboardApiOnly never mutates Selection
-//   - selectionCopy refuses while an IME host is focused
+//   - selectionCopy refuses while an IME host is focused (default)
+//   - yieldImeHost blurs → copies → restores focus
 
 function spyExec(impl: (cmd: string) => boolean) {
   if (typeof document.execCommand !== 'function') {
@@ -164,6 +165,33 @@ describe('isImeHostFocused / selectionCopy guard', () => {
 
     expect(writeClipboardSync('must-not-copy')).toBe(false);
     expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('yieldImeHost blurs the host, copies, and restores focus', () => {
+    vi.stubGlobal('isSecureContext', false);
+    vi.stubGlobal('navigator', {});
+    const ta = document.createElement('textarea');
+    document.body.appendChild(ta);
+    ta.focus();
+    expect(document.activeElement).toBe(ta);
+
+    let copied = '';
+    const exec = spyExec((cmd) => {
+      if (cmd === 'copy') {
+        // Host must have yielded focus for the selection path.
+        expect(document.activeElement).not.toBe(ta);
+        copied = window.getSelection()?.toString() ?? '';
+        return true;
+      }
+      return false;
+    });
+
+    expect(writeClipboardSync('from-terminal-pointer', { yieldImeHost: true })).toBe(
+      true,
+    );
+    expect(exec).toHaveBeenCalledWith('copy');
+    expect(copied).toBe('from-terminal-pointer');
+    expect(document.activeElement).toBe(ta);
   });
 });
 

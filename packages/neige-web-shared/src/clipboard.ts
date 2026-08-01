@@ -19,11 +19,22 @@
 //
 // OSC 52 from a TUI has no browser user-gesture at all. Callers that care
 // (the terminal core) should queue failed writes and retry on the next
-// user gesture. Prefer pointer for the selection-based path: running
-// selectionCopy on keydown mutates document Selection and cancels CJK IMEs.
-// Even on pointer, selectionCopy while an IME host (xterm textarea) is
-// focused leaves the IME dead until a focus cycle — so terminal/OSC paths
-// use writeClipboardApiOnly and only selection-copy from page chrome.
+// user gesture. Keyboard / mid-composition must never run selectionCopy
+// (mutates Selection → cancels CJK IME). Pointer gestures may use
+// selectionCopy with `yieldImeHost: true`, which blurs the xterm textarea
+// for the copy then restores focus — required on HTTP where the Clipboard
+// API is unavailable, without leaving Selection desynced while the host
+// stays focused.
+
+export type SelectionCopyOptions = {
+  /**
+   * When an IME host (textarea / xterm helper / …) is focused: blur it,
+   * run the selection copy, then restore focus. Default false = refuse
+   * without mutating Selection (safe accidental call). OSC pointer flush
+   * passes true so plain-HTTP copies still land.
+   */
+  yieldImeHost?: boolean;
+};
 
 /** True when focus is on an element that hosts CJK IME composition. */
 export function isImeHostFocused(): boolean {
@@ -58,7 +69,8 @@ export async function writeClipboardApiOnly(text: string): Promise<boolean> {
 /**
  * Preferred for UI buttons/menus: Clipboard API when secure, else selection
  * fallback. Not safe mid-IME-composition (selection fallback mutates
- * Selection) — use writeClipboardApiOnly from terminal/OSC paths.
+ * Selection) — use writeClipboardApiOnly from terminal keyboard/OSC-arrival
+ * paths. Pointer flushes should use writeClipboardSync({ yieldImeHost: true }).
  */
 export async function writeClipboard(text: string): Promise<boolean> {
   if (window.isSecureContext && navigator.clipboard?.writeText) {
@@ -85,23 +97,35 @@ export async function writeClipboard(text: string): Promise<boolean> {
  * sticky clipboard permission without going through selection, and the
  * extra write is harmless when selectionCopy already worked.
  *
- * Refuses to run selectionCopy while an IME host is focused (returns false
- * without mutating Selection) so callers can keep text staged.
+ * Pass `yieldImeHost: true` from pointer-gesture OSC flush so selection
+ * copy works while the xterm textarea is focused (blur → copy → restore).
+ * Default refuses while an IME host is focused so accidental callers don't
+ * kill CJK input.
  */
-export function writeClipboardSync(text: string): boolean {
+export function writeClipboardSync(
+  text: string,
+  opts?: SelectionCopyOptions,
+): boolean {
   if (window.isSecureContext && navigator.clipboard?.writeText) {
     void navigator.clipboard.writeText(text).catch(() => {
       /* ignore — selectionCopy result is authoritative */
     });
   }
-  return selectionCopy(text);
+  return selectionCopy(text, opts);
 }
 
-function selectionCopy(text: string): boolean {
-  // Mutating Selection while a textarea/input hosts IME composition (or even
-  // just has focus, for some fcitx/Chromium combos) cancels CJK input until
-  // the next focus cycle. Skip rather than break the terminal.
-  if (isImeHostFocused()) return false;
+function selectionCopy(text: string, opts?: SelectionCopyOptions): boolean {
+  // Mutating Selection while a textarea keeps focus desyncs CJK IME
+  // (fcitx/Chromium). Either refuse, or briefly yield focus for the copy.
+  let restore: HTMLElement | null = null;
+  if (isImeHostFocused()) {
+    if (!opts?.yieldImeHost) return false;
+    const ae = document.activeElement;
+    if (ae instanceof HTMLElement) {
+      restore = ae;
+      restore.blur();
+    }
+  }
 
   const selection = window.getSelection();
   // Preserve any selection the user had so we don't trash it on failure.
@@ -143,5 +167,9 @@ function selectionCopy(text: string): boolean {
   selection?.removeAllRanges();
   for (const r of savedRanges) selection?.addRange(r);
   span.remove();
+
+  // Restore terminal focus so the next keystroke still reaches xterm.
+  // preventScroll avoids jumping the page when the helper textarea refocuses.
+  restore?.focus({ preventScroll: true });
   return ok;
 }
