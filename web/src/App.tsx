@@ -11,6 +11,7 @@ import { useConversations } from './hooks/useConversations';
 import { useConfig, type RecentFile } from './hooks/useConfig';
 import { groupIntoTasks, tabTitle, type OpenFile } from './tasks';
 import type { ConvInfo, CreateConvRequest } from './types';
+import { OpenFileProvider } from './OpenFileContext';
 import './App.css';
 
 /**
@@ -398,132 +399,134 @@ function App() {
   }, [openTabIds]);
 
   return (
-    <div className="app">
-      <Sidebar
-        conversations={conversations}
-        tasks={taskGroups}
-        onNewAgent={(root) => {
-          setCreateParent(root);
-          setShowCreate(true);
-        }}
-        connected={connected}
-        openTabs={openTabIds}
-        activeTab={activeTabId}
-        openFiles={openFiles}
-        onSelectFile={focusPanel}
-        onCloseFile={closePanel}
-        onSelect={openTab}
-        onRename={rename}
-        onDelete={(id) => {
-          const conv = conversations.find((c) => c.id === id);
-          // Only a task root heads a group, so a child agent's delete lands
-          // here with no group and a count of 0 — it takes nothing with it.
-          const group = taskGroups.find((g) => g.root.id === id);
-          setDeleteTarget({
-            id,
-            title: conv?.title ?? 'untitled',
-            agentCount: group?.children.length ?? 0,
-          });
-        }}
-        onNew={() => {
-          setCreateParent(null);
-          setShowCreate(true);
-        }}
-        portForwards={config.portForwards || []}
-        onPortForwardUpdate={(ports) => {
-          updateConfig({ portForwards: ports });
-        }}
-      />
-      <main className="main">
-        <TerminalPanel
-          dockviewApiRef={dockviewApiRef}
-          onTabClose={handleTabClose}
-          onTabStateChange={syncTabState}
+    <OpenFileProvider openFile={openFile}>
+      <div className="app">
+        <Sidebar
+          conversations={conversations}
+          tasks={taskGroups}
+          onNewAgent={(root) => {
+            setCreateParent(root);
+            setShowCreate(true);
+          }}
+          connected={connected}
+          openTabs={openTabIds}
+          activeTab={activeTabId}
+          openFiles={openFiles}
+          onSelectFile={focusPanel}
+          onCloseFile={closePanel}
+          onSelect={openTab}
+          onRename={rename}
+          onDelete={(id) => {
+            const conv = conversations.find((c) => c.id === id);
+            // Only a task root heads a group, so a child agent's delete lands
+            // here with no group and a count of 0 — it takes nothing with it.
+            const group = taskGroups.find((g) => g.root.id === id);
+            setDeleteTarget({
+              id,
+              title: conv?.title ?? 'untitled',
+              agentCount: group?.children.length ?? 0,
+            });
+          }}
+          onNew={() => {
+            setCreateParent(null);
+            setShowCreate(true);
+          }}
+          portForwards={config.portForwards || []}
+          onPortForwardUpdate={(ports) => {
+            updateConfig({ portForwards: ports });
+          }}
         />
-      </main>
-      <QuickLauncher
-        open={showQuickLauncher}
-        onClose={() => setShowQuickLauncher(false)}
-        onLaunch={(cmd) => {
-          handleCreate({
-            title: cmd.title || '',
-            program: cmd.program,
-            cwd: cmd.cwd,
-            use_worktree: cmd.use_worktree,
-          });
-        }}
-        onSelect={openTab}
-        recentCommands={config.recentCommands || []}
-        conversations={conversations}
-      />
-      <Dialog open={showUrlInput} onOpenChange={setShowUrlInput}>
-        <DialogContent className="max-w-xl p-0">
-          <div className="url-input-dialog">
-            <input
-              className="url-input-field"
-              autoFocus
-              placeholder="Enter URL (e.g. bilibili.com)"
-              spellCheck={false}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  const val = (e.target as HTMLInputElement).value.trim();
-                  if (val) {
-                    let dest = val;
-                    if (!dest.startsWith('http://') && !dest.startsWith('https://')) {
-                      dest = 'https://' + dest;
+        <main className="main">
+          <TerminalPanel
+            dockviewApiRef={dockviewApiRef}
+            onTabClose={handleTabClose}
+            onTabStateChange={syncTabState}
+          />
+        </main>
+        <QuickLauncher
+          open={showQuickLauncher}
+          onClose={() => setShowQuickLauncher(false)}
+          onLaunch={(cmd) => {
+            handleCreate({
+              title: cmd.title || '',
+              program: cmd.program,
+              cwd: cmd.cwd,
+              use_worktree: cmd.use_worktree,
+            });
+          }}
+          onSelect={openTab}
+          recentCommands={config.recentCommands || []}
+          conversations={conversations}
+        />
+        <Dialog open={showUrlInput} onOpenChange={setShowUrlInput}>
+          <DialogContent className="max-w-xl p-0">
+            <div className="url-input-dialog">
+              <input
+                className="url-input-field"
+                autoFocus
+                placeholder="Enter URL (e.g. bilibili.com)"
+                spellCheck={false}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const val = (e.target as HTMLInputElement).value.trim();
+                    if (val) {
+                      let dest = val;
+                      if (!dest.startsWith('http://') && !dest.startsWith('https://')) {
+                        dest = 'https://' + dest;
+                      }
+                      openUrl(dest);
+                      setShowUrlInput(false);
                     }
-                    openUrl(dest);
-                    setShowUrlInput(false);
                   }
-                }
-                // Escape handled by Radix Dialog via onOpenChange
-              }}
-            />
-          </div>
-        </DialogContent>
-      </Dialog>
-      <FilePicker
-        open={showFilePicker}
-        onClose={() => setShowFilePicker(false)}
-        onOpenFile={openFile}
-        searchRoot={
-          conversations.find((c) => c.id === activeTabId)?.effective_cwd
-          || conversations.find((c) => c.id === lastConvTabId)?.effective_cwd
-          || conversations[0]?.effective_cwd
-          || ''
-        }
-        recentFiles={config.recentFiles || []}
-      />
-      <CreateDialog
-        open={showCreate}
-        // `createParent` deliberately survives the close. Radix keeps the
-        // content mounted through its exit animation, so clearing here would
-        // visibly re-render the dialog as top-level on the way out — the
-        // title flips and the worktree card pops back in. Both open paths
-        // set `createParent` unconditionally, so nothing stale can leak in.
-        onClose={() => setShowCreate(false)}
-        onCreate={handleCreate}
-        config={config}
-        onConfigUpdate={updateConfig}
-        parent={
-          createParent
-            ? { id: createParent.id, title: createParent.title, cwd: createParent.cwd }
-            : undefined
-        }
-      />
-      <ConfirmDialog
-        open={deleteTarget !== null}
-        title={deleteTarget && deleteTarget.agentCount > 0 ? 'Delete Task' : 'Delete Session'}
-        message={
-          deleteTarget && deleteTarget.agentCount > 0
-            ? `Permanently delete task "${deleteTarget.title}" and its ${deleteTarget.agentCount} agent${deleteTarget.agentCount === 1 ? '' : 's'}? This will remove all sessions and their metadata.`
-            : `Permanently delete "${deleteTarget?.title}"? This will remove the session and its metadata.`
-        }
-        confirmLabel="Delete"
-        onConfirm={handleDeleteConfirm}
-        onCancel={() => setDeleteTarget(null)}
-      />
-    </div>
+                  // Escape handled by Radix Dialog via onOpenChange
+                }}
+              />
+            </div>
+          </DialogContent>
+        </Dialog>
+        <FilePicker
+          open={showFilePicker}
+          onClose={() => setShowFilePicker(false)}
+          onOpenFile={openFile}
+          searchRoot={
+            conversations.find((c) => c.id === activeTabId)?.effective_cwd
+            || conversations.find((c) => c.id === lastConvTabId)?.effective_cwd
+            || conversations[0]?.effective_cwd
+            || ''
+          }
+          recentFiles={config.recentFiles || []}
+        />
+        <CreateDialog
+          open={showCreate}
+          // `createParent` deliberately survives the close. Radix keeps the
+          // content mounted through its exit animation, so clearing here would
+          // visibly re-render the dialog as top-level on the way out — the
+          // title flips and the worktree card pops back in. Both open paths
+          // set `createParent` unconditionally, so nothing stale can leak in.
+          onClose={() => setShowCreate(false)}
+          onCreate={handleCreate}
+          config={config}
+          onConfigUpdate={updateConfig}
+          parent={
+            createParent
+              ? { id: createParent.id, title: createParent.title, cwd: createParent.cwd }
+              : undefined
+          }
+        />
+        <ConfirmDialog
+          open={deleteTarget !== null}
+          title={deleteTarget && deleteTarget.agentCount > 0 ? 'Delete Task' : 'Delete Session'}
+          message={
+            deleteTarget && deleteTarget.agentCount > 0
+              ? `Permanently delete task "${deleteTarget.title}" and its ${deleteTarget.agentCount} agent${deleteTarget.agentCount === 1 ? '' : 's'}? This will remove all sessions and their metadata.`
+              : `Permanently delete "${deleteTarget?.title}"? This will remove the session and its metadata.`
+          }
+          confirmLabel="Delete"
+          onConfirm={handleDeleteConfirm}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      </div>
+    </OpenFileProvider>
   );
 }
 

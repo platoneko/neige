@@ -6,11 +6,18 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { Marked } from 'marked';
 import { DropdownMenu } from '@radix-ui/themes';
 import { authedFetch, fileUrl as buildFileUrl } from '../api';
 import { writeClipboard } from '../clipboard';
+import { useOpenFile } from '../OpenFileContext';
+import {
+  basenamePath,
+  classifyMarkdownHref,
+  resolveMarkdownPath,
+} from '../markdownLinks';
 import { SearchBar, createSearchAdapter, type SearchAdapter } from './FileSearch';
 import {
   MarkdownToc,
@@ -251,6 +258,48 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     }
   }, [filePath, relPath]);
 
+  const openFile = useOpenFile();
+
+  const handleMarkdownClick = useCallback(
+    (e: ReactMouseEvent<HTMLDivElement>) => {
+      // Only plain left-clicks
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+        return;
+      }
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const anchor = target.closest('a[href]');
+      if (!anchor || !(anchor instanceof HTMLAnchorElement)) return;
+      // Stay within this pane (ignore if somehow outside)
+      if (!e.currentTarget.contains(anchor)) return;
+
+      const raw = anchor.getAttribute('href');
+      const kind = classifyMarkdownHref(raw);
+
+      if (kind === 'ignore') {
+        e.preventDefault();
+        return;
+      }
+      if (kind === 'hash') {
+        e.preventDefault();
+        return;
+      }
+      if (kind === 'external') {
+        e.preventDefault();
+        if (raw) window.open(raw, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      // path
+      e.preventDefault();
+      if (!raw) return;
+      const abs = resolveMarkdownPath(filePath, raw);
+      if (!abs) return;
+      const name = basenamePath(abs) || abs;
+      openFile?.(abs, name, baseCwd);
+    },
+    [filePath, baseCwd, openFile],
+  );
+
   useEffect(() => {
     if (!isMarkdown || headings.length === 0) return;
     if (typeof IntersectionObserver === 'undefined') return;
@@ -475,6 +524,7 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
             <div
               className="file-viewer-markdown"
               ref={setPaneContainer}
+              onClick={handleMarkdownClick}
             />
             {headings.length > 0 && (
               <MarkdownToc
