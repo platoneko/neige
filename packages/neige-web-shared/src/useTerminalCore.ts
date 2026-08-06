@@ -1,9 +1,30 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 import { Terminal } from '@xterm/xterm';
-import type { ITheme, ITerminalOptions } from '@xterm/xterm';
+import type { ITheme, ITerminalOptions, ITerminalAddon } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+// Canvas renderer: xterm 6 defaults to DOM, which drifts CJK/box-drawing
+// right edges (letter-spacing on text runs). See tryEnableCanvasRenderer.
+import { CanvasAddon } from '@xterm/addon-canvas';
 import { writeClipboardApiOnly, writeClipboardSync } from './clipboard';
+
+/**
+ * Enable the canvas renderer. xterm.js 6 ships DomRenderer by default;
+ * mixed CJK + box-drawing then drifts the right edge of rows (measured
+ * outer `│`/`┆` at different x, some past the screen edge) so Grok
+ * fullscreen borders look misaligned. Canvas paints on a fixed cell grid.
+ * Returns the addon so the caller can dispose it, or null if canvas fails
+ * (headless / no 2d context) — terminal keeps DOM renderer.
+ */
+function tryEnableCanvasRenderer(term: Terminal): ITerminalAddon | null {
+  try {
+    const addon = new CanvasAddon();
+    term.loadAddon(addon);
+    return addon;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Shared WS framing contract (see crates/neige-server/src/api/ws.rs handle_ws):
@@ -22,6 +43,59 @@ import { writeClipboardApiOnly, writeClipboardSync } from './clipboard';
 function readU64BE(bytes: Uint8Array, offset: number): bigint {
   const view = new DataView(bytes.buffer, bytes.byteOffset + offset, 8);
   return view.getBigUint64(0, false);
+}
+
+/**
+ * Measure cols/rows from the fit parent using live cell metrics and the
+ * *actual* scrollbar gutter.
+ *
+ * `@xterm/addon-fit` always subtracts 14px whenever `scrollback > 0`
+ * (`overviewRuler?.width || 14`). That under-counts by 1–2 cols when:
+ *   - the scrollbar is overlay / width 0, or
+ *   - the app is on the alt screen (Grok / Claude / vim) and no bar shows.
+ * Fullscreen box-drawing borders then sit short of the panel edge —
+ * "jagged / misaligned frame" after refresh.
+ *
+ * We keep FitAddon for `fit()` / resize plumbing but replace its
+ * `proposeDimensions` with this.
+ */
+function proposeExactDimensions(
+  term: Terminal,
+  container: HTMLElement,
+): { cols: number; rows: number } | undefined {
+  // Cell metrics live on the private render service — same path FitAddon uses.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cell = (term as any)._core?._renderService?.dimensions?.css?.cell as
+    | { width: number; height: number }
+    | undefined;
+  if (!cell || cell.width === 0 || cell.height === 0) return undefined;
+
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+  if (width <= 0 || height <= 0) return undefined;
+
+  let padX = 0;
+  let padY = 0;
+  if (term.element) {
+    const cs = window.getComputedStyle(term.element);
+    padX =
+      (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    padY =
+      (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  }
+
+  // Live gutter only. 0 when overlay, hidden, or content does not overflow.
+  let scrollbarW = 0;
+  const viewport = term.element?.querySelector(
+    '.xterm-viewport',
+  ) as HTMLElement | null;
+  if (viewport) {
+    scrollbarW = Math.max(0, viewport.offsetWidth - viewport.clientWidth);
+  }
+
+  const cols = Math.max(2, Math.floor((width - padX - scrollbarW) / cell.width));
+  const rows = Math.max(1, Math.floor((height - padY) / cell.height));
+  return { cols, rows };
 }
 
 export type TerminalStatus = 'connecting' | 'open' | 'closed' | 'reconnecting';
@@ -115,6 +189,11 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     term.loadAddon(fit);
     container.innerHTML = '';
     term.open(container);
+    // Must load after open() — canvas addon binds to the screen element.
+    const canvasAddon = tryEnableCanvasRenderer(term);
+    // Replace FitAddon's proposeDimensions (always −14px scrollbar) with a
+    // measurement that uses the live gutter. fit.fit() calls this.
+    fit.proposeDimensions = () => proposeExactDimensions(term, container);
     termRef.current = term;
     fitRef.current = fit;
     onTerminalReadyRef.current?.(term);
@@ -217,36 +296,89 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     // use a faster path + double rAF so dockview layout settling and
     // async webfont metrics don't leave fullscreen TUIs (Grok) one cell
     // short at the edges.
+    //
+    // After a seq=0 Snapshot we additionally:
+    //   1. Clear the alt-screen if the restore prefix re-entered one —
+    //      ring replay is often a mid-frame and paints garbage until the
+    //      TUI full-repaints.
+    //   2. Force a PTY winsize *change* (nudge then restore). Linux only
+    //      delivers SIGWINCH when TIOCSWINSZ actually changes size — a
+    //      same-size resize after browser refresh is a no-op, so Grok
+    //      never full-repaints.
     let disposed = false;
     let lastCols = 0;
     let lastRows = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     let fitRaf1 = 0;
     let fitRaf2 = 0;
+    let nudgeTimer: ReturnType<typeof setTimeout> | undefined;
+    // Sticky until forcePtyRedraw actually runs (container may still be
+    // 0×0 when the first post-snapshot fit fires). RO/open retries keep
+    // seeing this and upgrade to immediate.
+    let pendingForceRedraw = false;
 
-    const sendResize = (cols: number, rows: number) => {
+    const sendResize = (cols: number, rows: number, opts?: { record?: boolean }) => {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN && cols > 0 && rows > 0) {
         ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-        lastCols = cols;
-        lastRows = rows;
+        if (opts?.record !== false) {
+          lastCols = cols;
+          lastRows = rows;
+        }
       }
     };
 
-    const runFit = (): boolean => {
+    /** Push a real winsize change so the child gets SIGWINCH even when the
+     *  settled size already matches the PTY (common after browser refresh). */
+    const forcePtyRedraw = (cols: number, rows: number): boolean => {
+      if (disposed || cols < 2 || rows < 2) return false;
+      if (nudgeTimer) clearTimeout(nudgeTimer);
+      // Nudge rows by ±1 first (don't record — intermediate size is not
+      // the settled client size). Restore after a short delay so the kernel
+      // delivers two distinct TIOCSWINSZ / SIGWINCH events; a 0ms timeout
+      // can collapse them before the TUI wakes.
+      const nudgedRows = rows > 2 ? rows - 1 : rows + 1;
+      sendResize(cols, nudgedRows, { record: false });
+      nudgeTimer = setTimeout(() => {
+        nudgeTimer = undefined;
+        if (disposed) return;
+        sendResize(cols, rows);
+        try {
+          // Drop any stale glyph atlas from the pre-resize ring paint.
+          term.clearTextureAtlas?.();
+          term.refresh(0, term.rows - 1);
+        } catch {
+          /* disposed mid-refresh */
+        }
+      }, 50);
+      return true;
+    };
+
+    const runFit = (opts?: { forceRedraw?: boolean }): boolean => {
       if (disposed) return false;
       const rect = container.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return false;
       fit.fit();
       const dims = fit.proposeDimensions();
-      if (dims && (dims.cols !== lastCols || dims.rows !== lastRows)) {
+      if (!dims) return true;
+      if (opts?.forceRedraw) {
+        // Always end on a SIGWINCH-producing resize after Snapshot, even
+        // when cols/rows already match lastCols/lastRows / the daemon.
+        if (forcePtyRedraw(dims.cols, dims.rows)) {
+          pendingForceRedraw = false;
+        }
+        return true;
+      }
+      if (dims.cols !== lastCols || dims.rows !== lastRows) {
         sendResize(dims.cols, dims.rows);
       }
       return true;
     };
 
     /** After a layout-critical event, fit now and once more after paint. */
-    const fitWithSettle = () => {
+    const fitWithSettle = (opts?: { forceRedraw?: boolean }) => {
+      // First pass sizes the local emulator. Final pass after paint can
+      // force a PTY redraw (Snapshot reattach) once layout has settled.
       runFit();
       if (fitRaf1) cancelAnimationFrame(fitRaf1);
       if (fitRaf2) cancelAnimationFrame(fitRaf2);
@@ -254,22 +386,27 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         fitRaf1 = 0;
         fitRaf2 = requestAnimationFrame(() => {
           fitRaf2 = 0;
-          runFit();
+          runFit(opts);
         });
       });
     };
 
-    const scheduleFit = (opts?: { immediate?: boolean }) => {
+    const scheduleFit = (opts?: { immediate?: boolean; forceRedraw?: boolean }) => {
+      if (opts?.forceRedraw) pendingForceRedraw = true;
+      // Upgrade to immediate while a force-redraw is outstanding so a
+      // debounced RO tick cannot postpone / drop the Snapshot nudge.
+      const immediate = !!opts?.immediate || pendingForceRedraw;
       if (resizeTimer) clearTimeout(resizeTimer);
-      const delay = opts?.immediate ? 0 : 150;
       resizeTimer = setTimeout(() => {
         resizeTimer = undefined;
-        if (opts?.immediate) {
-          fitWithSettle();
+        // Do NOT clear pendingForceRedraw here — only forcePtyRedraw does,
+        // once the container has a real size.
+        if (immediate) {
+          fitWithSettle({ forceRedraw: pendingForceRedraw });
         } else {
           runFit();
         }
-      }, delay);
+      }, immediate ? 0 : 150);
     };
     scheduleFitRef.current = () => scheduleFit();
 
@@ -301,11 +438,46 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     let writeBuf: { seq: bigint; bytes: Uint8Array; reset: boolean }[] = [];
     let rafId = 0;
 
+    /** Snapshot restore prefix re-enters alt-screen when these DEC modes are set. */
+    const payloadEnablesAltScreen = (bytes: Uint8Array): boolean => {
+      const n = Math.min(bytes.byteLength, 256);
+      let s = '';
+      for (let i = 0; i < n; i++) s += String.fromCharCode(bytes[i]!);
+      // restore_sequence is `ESC [ ? m1 ; m2 ; … h` with alt modes first.
+      return (
+        /\x1b\[\?[\d;]*1049[\d;]*h/.test(s) ||
+        /\x1b\[\?[\d;]*1047[\d;]*h/.test(s) ||
+        /\x1b\[\?(?:[\d;]*;)?47(?:;[\d;]*)?h/.test(s)
+      );
+    };
+
     const flush = () => {
       rafId = 0;
       const chunks = writeBuf;
       writeBuf = [];
       let sawReset = false;
+      let altScreenSnapshot = false;
+      let pending = 0;
+      let finished = 0;
+
+      const onWritesDone = () => {
+        if (disposed) return;
+        if (!sawReset) return;
+        // Remount + snapshot often lands before dockview has finished sizing
+        // the panel; wait until write() has parsed the ring so fit/resize
+        // does not reflow mid-parse. For fullscreen TUIs, wipe the (often
+        // mid-frame) ring paint first — SIGWINCH then makes the app repaint
+        // a clean screen. Shells without alt-screen keep the replay.
+        const afterClear = () => {
+          if (!disposed) scheduleFit({ immediate: true, forceRedraw: true });
+        };
+        if (altScreenSnapshot) {
+          term.write('\x1b[H\x1b[2J', afterClear);
+        } else {
+          afterClear();
+        }
+      };
+
       for (const c of chunks) {
         if (c.reset) {
           // seq=0 snapshot: hard-reset then repaint. The server prefixes
@@ -314,12 +486,16 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
           // the panel was closed and remounted — see DecModeTracker.
           term.reset();
           sawReset = true;
+          if (payloadEnablesAltScreen(c.bytes)) altScreenSnapshot = true;
         }
-        term.write(c.bytes);
+        pending++;
+        term.write(c.bytes, () => {
+          finished++;
+          if (finished >= pending) onWritesDone();
+        });
       }
-      // Remount + snapshot often lands before dockview has finished sizing
-      // the panel; refit immediately + settle so PTY and xterm agree.
-      if (sawReset) scheduleFit({ immediate: true });
+      // Empty batch (shouldn't happen) — still honour reset if set.
+      if (pending === 0) onWritesDone();
     };
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -460,17 +636,65 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     };
     document.addEventListener('visibilitychange', onVisibility);
 
-    // Webfonts (JetBrains Mono) load async; first cell metrics may use a
-    // fallback face. Refit when fonts settle so cols/rows match glyphs.
-    if (document.fonts?.ready) {
-      void document.fonts.ready.then(() => {
-        if (!disposed) scheduleFit({ immediate: true });
+    // Webfonts (JetBrains Mono) load async. First open often measures the
+    // fallback face (narrower cells → over-count cols, e.g. 90 instead of
+    // 79) and ships that winsize to the PTY. When the real face arrives
+    // glyphs are wider than the cell grid → Grok box-drawing borders look
+    // misaligned. Force CharSizeService to remeasure (it only runs on
+    // fontFamily/fontSize option change) then fit + SIGWINCH.
+    const remeasureFontsAndFit = () => {
+      if (disposed) return;
+      try {
+        // CharSizeService only remeasures on option *change*. Re-assigning
+        // the same fontFamily is a no-op, so bump fontSize by an epsilon
+        // and restore — that fires measure() with the now-loaded face.
+        const size = term.options.fontSize ?? 14;
+        term.options.fontSize = size + 0.01;
+        term.options.fontSize = size;
+        // Also hit the private service directly (same path open() uses).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const core = (term as any)._core as
+          | { _charSizeService?: { measure?: () => void } }
+          | undefined;
+        core?._charSizeService?.measure?.();
+      } catch {
+        /* options frozen / disposed */
+      }
+      lastCols = 0;
+      lastRows = 0;
+      scheduleFit({ immediate: true, forceRedraw: true });
+    };
+
+    const onFontsReady = () => {
+      if (disposed) return;
+      const fam = String(term.options.fontFamily || '')
+        .split(',')[0]
+        ?.replace(/['"]/g, '')
+        .trim();
+      const size = term.options.fontSize || 14;
+      const loadP =
+        fam && document.fonts?.load
+          ? document.fonts.load(`${size}px "${fam}"`).catch(() => undefined)
+          : Promise.resolve();
+      void Promise.resolve(loadP).then(() => {
+        if (!disposed) remeasureFontsAndFit();
       });
+    };
+
+    if (document.fonts?.ready) {
+      void document.fonts.ready.then(onFontsReady);
     }
+    // A late-loading face (or display=swap swap-in) can fire after ready.
+    const onLoadingDone = () => {
+      if (!disposed) remeasureFontsAndFit();
+    };
+    document.fonts?.addEventListener?.('loadingdone', onLoadingDone);
 
     return () => {
       disposed = true;
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (nudgeTimer) clearTimeout(nudgeTimer);
+      document.fonts?.removeEventListener?.('loadingdone', onLoadingDone);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (rafId) cancelAnimationFrame(rafId);
       if (fitRaf1) cancelAnimationFrame(fitRaf1);
@@ -486,6 +710,11 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       ro.disconnect();
       dataDisposable.dispose();
       osc52Disposable.dispose();
+      try {
+        canvasAddon?.dispose();
+      } catch {
+        /* already disposed with term */
+      }
       wsRef.current?.close(1000);
       term.dispose();
       termRef.current = null;

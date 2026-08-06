@@ -32,12 +32,34 @@ export function useTerminal(containerId: string | null) {
     } as RefObject<HTMLDivElement | null>;
   }, [containerId]);
 
+  // Full GitHub-dark ANSI palette. Important: `black` must match `background`.
+  // After term.reset() on Snapshot reattach, xterm falls back to theme ANSI
+  // colors (OSC 4 palette from session start has usually left the ring).
+  // TUIs like Grok paint chrome with SGR 40 (ANSI black); pure #000000 on a
+  // #0d1117 canvas reads as solid black blocks in the status/input bar.
   const theme = useMemo(
     () => ({
       background: '#0d1117',
       foreground: '#c9d1d9',
       cursor: '#58a6ff',
+      cursorAccent: '#0d1117',
       selectionBackground: '#264f78',
+      black: '#0d1117',
+      red: '#ff7b72',
+      green: '#3fb950',
+      yellow: '#d29922',
+      blue: '#58a6ff',
+      magenta: '#bc8cff',
+      cyan: '#39c5cf',
+      white: '#b1bac4',
+      brightBlack: '#6e7681',
+      brightRed: '#ffa198',
+      brightGreen: '#56d364',
+      brightYellow: '#e3b341',
+      brightBlue: '#79c0ff',
+      brightMagenta: '#d2a8ff',
+      brightCyan: '#56d4dd',
+      brightWhite: '#f0f6fc',
     }),
     [],
   );
