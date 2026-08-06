@@ -783,6 +783,13 @@
   min-width: 0;
 }
 
+/* xterm defaults to overflow-y:scroll, which reserves a classic scrollbar
+   gutter even on alt-screen TUIs that never overflow. Prefer auto so the
+   gutter collapses when unused; live fit measures the real gutter width. */
+.terminal-container .xterm .xterm-viewport {
+  overflow-y: auto;
+}
+
 /* Prevent dockview internal containers from leaking content. Theme-agnostic
    so swapping themes doesn't require touching this. */
 [class*="dockview-theme-"] .dv-content-container,
