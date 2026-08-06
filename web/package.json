@@ -25,6 +25,7 @@
     "dockview": "^5.2.0",
     "lucide-react": "^1.11.0",
     "marked": "^18.0.0",
+    "mermaid": "^11.16.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },

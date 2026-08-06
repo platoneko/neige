@@ -26,13 +26,25 @@ import {
   type TocHeading,
   type TocLevel,
 } from './MarkdownToc';
+import { getMermaid } from '../mermaidLoader';
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 // Render markdown with h1–h4 headings tagged `id="md-h-N"` in document order,
 // and collect a parallel `headings` list the TOC can render off of. Deriving
 // both from a single marked pass keeps the DOM ids and the TOC entries aligned
 // on edge cases where a standalone regex extractor would drift (headings
 // inside blockquotes, unusual inline formatting, etc.).
-function renderMarkdownWithToc(source: string): {
+//
+// ```mermaid fences become <pre class="mermaid">…</pre>; mermaid.run() turns
+// those into SVGs after the HTML is written into the pane.
+export function renderMarkdownWithToc(source: string): {
   html: string;
   headings: TocHeading[];
 } {
@@ -52,6 +64,17 @@ function renderMarkdownWithToc(source: string): {
           return `<h${token.depth} id="${id}">${inner}</h${token.depth}>\n`;
         }
         return `<h${token.depth}>${inner}</h${token.depth}>\n`;
+      },
+      code({ text, lang, escaped }) {
+        // marked may pass extras after the language id (e.g. `mermaid {…}`);
+        // only the first token is the language name.
+        const language = (lang ?? '').match(/^\S*/)?.[0]?.toLowerCase() ?? '';
+        if (language === 'mermaid') {
+          const body = escaped ? text : escapeHtml(text);
+          return `<pre class="mermaid">${body}</pre>\n`;
+        }
+        // Fall through to marked's default <pre><code class="language-…">.
+        return false;
       },
     },
   });
@@ -365,11 +388,38 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
   // Memoizing the prop object is easy to regress; a layout effect that only
   // runs when the HTML string changes never rewrites the tree on search
   // keystrokes, match-index updates, or TOC scrollspy.
+  //
+  // After the HTML lands, mermaid fences are rendered in-place. That mutates
+  // the tree (source → SVG), so `paneDomGen` bumps when the pane is stable
+  // again and the search adapter can recollect ranges against the final DOM.
+  const [paneDomGen, setPaneDomGen] = useState(0);
   useLayoutEffect(() => {
     if (!isMarkdown) return;
     const el = paneContainerRef.current;
     if (!el) return;
     el.innerHTML = markdownHtml;
+
+    let cancelled = false;
+    const nodes = Array.from(el.querySelectorAll<HTMLElement>('pre.mermaid'));
+    if (nodes.length === 0) return;
+
+    void (async () => {
+      try {
+        const mermaid = await getMermaid();
+        if (cancelled) return;
+        const live = nodes.filter((n) => n.isConnected);
+        if (live.length === 0) return;
+        await mermaid.run({ nodes: live, suppressErrors: true });
+      } catch (err) {
+        console.error('Mermaid render failed', err);
+      } finally {
+        if (!cancelled) setPaneDomGen((g) => g + 1);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isMarkdown, markdownHtml]);
 
   const closeSearch = useCallback(() => {
@@ -412,8 +462,10 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     };
     // searchQuery is read only for the initial apply after a DOM rebuild; live
     // keystrokes go through handleSearchChange → adapter.setQuery.
+    // paneDomGen: mermaid.run replaces <pre.mermaid> with SVG after the
+    // markdownHtml write; rebuild so ranges target the final tree.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above
-  }, [isMarkdown, markdownHtml, content]);
+  }, [isMarkdown, markdownHtml, content, paneDomGen]);
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
