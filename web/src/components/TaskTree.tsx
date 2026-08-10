@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  Crosshair,
   FileText,
   Folder,
   FolderOpen,
@@ -10,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { ConvInfo } from '../types';
 import { activityClass, rollUpActivity, type Activity } from '@neige/shared';
+import { isFocused } from '../focus';
 import { staleOverrides, type OpenFile, type TaskGroup } from '../tasks';
 
 function timeAgo(iso: string): string {
@@ -99,9 +101,11 @@ interface AgentRowProps {
   activity: Activity;
   active: boolean;
   open: boolean;
+  focused: boolean;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
+  onToggleFocus: (id: string) => void;
   onNewAgent?: () => void;
 }
 
@@ -114,14 +118,16 @@ function AgentRow({
   activity,
   active,
   open,
+  focused,
   onSelect,
   onDelete,
   onRename,
+  onToggleFocus,
   onNewAgent,
 }: AgentRowProps) {
   return (
     <div
-      className={`conv-item ${isTask ? 'task-row' : 'agent-row'} ${active ? 'active' : ''} ${open ? 'open' : ''} ${activityClass(activity)}`}
+      className={`conv-item ${isTask ? 'task-row' : 'agent-row'} ${active ? 'active' : ''} ${open ? 'open' : ''} ${focused ? 'focused' : ''} ${activityClass(activity)}`}
       onClick={() => onSelect(conv.id)}
     >
       <button
@@ -186,6 +192,18 @@ function AgentRow({
             +
           </button>
         )}
+        <button
+          className={`btn-focus ${focused ? 'on' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFocus(conv.id);
+          }}
+          title={focused ? 'Unfocus' : 'Focus'}
+          aria-label={focused ? 'Unfocus' : 'Focus'}
+          aria-pressed={focused}
+        >
+          <Crosshair size={12} strokeWidth={2} />
+        </button>
         <button
           className="btn-delete"
           onClick={(e) => {
@@ -259,6 +277,8 @@ interface TaskTreeProps {
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onNewAgent: (root: ConvInfo) => void;
+  focusedIds: readonly string[];
+  onToggleFocus: (id: string) => void;
 }
 
 export function TaskTree({
@@ -272,6 +292,8 @@ export function TaskTree({
   onDelete,
   onRename,
   onNewAgent,
+  focusedIds,
+  onToggleFocus,
 }: TaskTreeProps) {
   // Both levels follow one rule: a row expands while it has something to
   // reveal. For a task row that's its child agents plus the root's own
@@ -345,9 +367,11 @@ export function TaskTree({
               }
               active={activeTab === task.root.id}
               open={openTabs.includes(task.root.id)}
+              focused={isFocused(focusedIds, task.root.id)}
               onSelect={onSelect}
               onDelete={onDelete}
               onRename={onRename}
+              onToggleFocus={onToggleFocus}
               onNewAgent={() => onNewAgent(task.root)}
             />
             {taskExpanded && (
@@ -376,9 +400,11 @@ export function TaskTree({
                         activity={child.activity}
                         active={activeTab === child.id}
                         open={openTabs.includes(child.id)}
+                        focused={isFocused(focusedIds, child.id)}
                         onSelect={onSelect}
                         onDelete={onDelete}
                         onRename={onRename}
+                        onToggleFocus={onToggleFocus}
                       />
                       {childExpanded &&
                         childFiles.map((f) => (

@@ -10,6 +10,7 @@ import { QuickLauncher } from './components/QuickLauncher';
 import { useConversations } from './hooks/useConversations';
 import { useConfig, type RecentFile } from './hooks/useConfig';
 import { groupIntoTasks, tabTitle, type OpenFile } from './tasks';
+import { pruneFocus, toggleFocus } from './focus';
 import type { ConvInfo, CreateConvRequest } from './types';
 import { OpenFileProvider } from './OpenFileContext';
 import './App.css';
@@ -75,6 +76,7 @@ function App() {
   const { conversations, connected, loadedOnce, create, rename, remove } = useConversations();
   const taskGroups = useMemo(() => groupIntoTasks(conversations), [conversations]);
   const { config, update: updateConfig } = useConfig();
+  const focusedAgentIds = config.focusedAgentIds ?? [];
   const { toast } = useToast();
   const [showCreate, setShowCreate] = useState(false);
   // Set when the create dialog was opened from a task row's + button; the
@@ -368,6 +370,27 @@ function App() {
     }
   }, [conversations, openFiles, loadedOnce, connected]);
 
+  // Drop focus ids whose conversations no longer exist. Same gates as panel
+  // cleanup: don't prune against an empty pre-load list or a stale offline
+  // snapshot.
+  useEffect(() => {
+    if (!loadedOnce || !connected) return;
+    const alive = new Set(conversations.map((c) => c.id));
+    const next = pruneFocus(focusedAgentIds, alive);
+    if (next !== focusedAgentIds) {
+      void updateConfig({ focusedAgentIds: next });
+    }
+  }, [conversations, focusedAgentIds, loadedOnce, connected, updateConfig]);
+
+  const handleToggleFocus = useCallback(
+    (id: string) => {
+      void updateConfig({
+        focusedAgentIds: toggleFocus(config.focusedAgentIds ?? [], id),
+      });
+    },
+    [config.focusedAgentIds, updateConfig],
+  );
+
   // Keep the agent-left / files-right split alive: whenever there's an agent
   // panel but nothing on the file side (either the last file was closed or
   // it never opened), spawn a placeholder to hold the right group open. The
@@ -431,6 +454,8 @@ function App() {
             setCreateParent(null);
             setShowCreate(true);
           }}
+          focusedIds={focusedAgentIds}
+          onToggleFocus={handleToggleFocus}
           portForwards={config.portForwards || []}
           onPortForwardUpdate={(ports) => {
             updateConfig({ portForwards: ports });

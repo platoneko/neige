@@ -39,6 +39,8 @@
   --color-red: #f85149;
   --color-red-dim: rgb(248 81 73 / 0.1);
   --color-yellow: #d29922;
+  --color-orange: #e0873a;
+  --color-orange-dim: rgb(224 135 58 / 0.12);
 
   /* Semantic accents — decouple action color (buttons) from status color
      (running dots). Same green today, but separation lets one drift without

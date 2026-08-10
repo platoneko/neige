@@ -265,6 +265,25 @@
   border-left: 2px solid var(--blue);
 }
 
+/* User focus set — orange so it never reads as "active panel" (blue). */
+.conv-item.focused {
+  background: var(--orange-dim);
+  outline: 1px solid rgba(224, 135, 58, 0.45);
+  outline-offset: -1px;
+}
+
+.conv-item.focused .conv-title {
+  color: var(--orange);
+}
+
+/* Focus + active: keep active blue fill, keep orange title/outline for the set. */
+.conv-item.focused.active {
+  background: var(--blue-dim);
+  border-color: rgba(56, 139, 253, 0.4);
+  outline: 1px solid rgba(224, 135, 58, 0.55);
+  outline-offset: -1px;
+}
+
 .conv-info {
   display: flex;
   flex-direction: column;
@@ -424,6 +443,42 @@
 .btn-delete:hover {
   opacity: 1 !important;
   background: var(--red-dim);
+}
+
+/* Focus toggle: hover-only, orange when already focused (mirrors btn-delete). */
+.btn-focus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.conv-item:hover .btn-focus {
+  opacity: 0.4;
+}
+
+.btn-focus:hover {
+  opacity: 1 !important;
+  color: var(--orange);
+  background: var(--orange-dim);
+}
+
+.btn-focus.on {
+  color: var(--orange);
+}
+
+.conv-item:hover .btn-focus.on {
+  opacity: 0.85;
 }
 
 /* Empty state */
@@ -2243,6 +2298,11 @@
 
 .conv-item.agent-row .conv-title {
   color: var(--text-secondary);
+}
+
+/* Beat .agent-row .conv-title specificity so focus orange still wins. */
+.conv-item.agent-row.focused .conv-title {
+  color: var(--orange);
 }
 
 .btn-new-agent {
