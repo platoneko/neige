@@ -24,6 +24,8 @@ export interface NeigeConfig {
   portForwards?: PortForward[];
   recentCommands?: RecentCommand[];
   recentFiles?: RecentFile[];
+  /** Conversation UUIDs the user is watching (sidebar focus highlight). */
+  focusedAgentIds?: string[];
 }
 
 export function useConfig() {

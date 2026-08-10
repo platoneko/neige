@@ -26,6 +26,9 @@ interface SidebarProps {
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onNew: () => void;
+  /** Conversation ids currently in the user's focus set. */
+  focusedIds: readonly string[];
+  onToggleFocus: (id: string) => void;
   portForwards: PortForward[];
   onPortForwardUpdate: (ports: PortForward[]) => void;
 }
@@ -51,6 +54,8 @@ export function Sidebar({
   onDelete,
   onRename,
   onNew,
+  focusedIds,
+  onToggleFocus,
   portForwards,
   onPortForwardUpdate,
 }: SidebarProps) {
@@ -222,6 +227,8 @@ export function Sidebar({
               onDelete={onDelete}
               onRename={onRename}
               onNewAgent={onNewAgent}
+              focusedIds={focusedIds}
+              onToggleFocus={onToggleFocus}
             />
           )}
           <PortForwardPanel
