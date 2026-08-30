@@ -26,6 +26,7 @@ import {
   type TocHeading,
   type TocLevel,
 } from './MarkdownToc';
+import { getKatex } from '../katexLoader';
 import { getMermaid } from '../mermaidLoader';
 
 function escapeHtml(s: string): string {
@@ -36,6 +37,49 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+// Inline $…$: opening/closing $ must not hug whitespace (cuts down on `$5`
+// currency false positives). Single-character bodies like `$x$` are allowed.
+const INLINE_DOLLAR_RE = /^\$([^\s$](?:[^$\n]*?[^\s$])?)\$/;
+const INLINE_PAREN_RE = /^\\\(([\s\S]+?)\\\)/;
+const DISPLAY_DOLLAR_RE = /^\$\$([\s\S]+?)\$\$/;
+const DISPLAY_BRACKET_RE = /^\\\[([\s\S]+?)\\\]/;
+
+function indexOfDollarInline(src: string): number | undefined {
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] !== '$') continue;
+    // `$$` is display — handled separately.
+    if (src[i + 1] === '$') {
+      i++;
+      continue;
+    }
+    return i;
+  }
+  return undefined;
+}
+
+function indexOfNeedle(src: string, needle: string): number | undefined {
+  const i = src.indexOf(needle);
+  return i === -1 ? undefined : i;
+}
+
+function earliestIndex(...idxs: Array<number | undefined>): number | undefined {
+  let best: number | undefined;
+  for (const i of idxs) {
+    if (i === undefined) continue;
+    if (best === undefined || i < best) best = i;
+  }
+  return best;
+}
+
+function mathToken(
+  type: 'mathBlock' | 'mathInline',
+  raw: string,
+  text: string,
+  displayMode: boolean,
+) {
+  return { type, raw, text, displayMode };
+}
+
 // Render markdown with h1–h4 headings tagged `id="md-h-N"` in document order,
 // and collect a parallel `headings` list the TOC can render off of. Deriving
 // both from a single marked pass keeps the DOM ids and the TOC entries aligned
@@ -44,12 +88,81 @@ function escapeHtml(s: string): string {
 //
 // ```mermaid fences become <pre class="mermaid">…</pre>; mermaid.run() turns
 // those into SVGs after the HTML is written into the pane.
+//
+// Math delimiters ($…$ / $$…$$ / \(…\) / \[…\]) become <span/div class="math …">
+// with escaped TeX; getKatex() renders them after the HTML is written (same
+// post-pass as mermaid). \( / \[ MUST be tokenized before marked's escape
+// tokenizer strips the backslash.
 export function renderMarkdownWithToc(source: string): {
   html: string;
   headings: TocHeading[];
 } {
   const headings: TocHeading[] = [];
   const m = new Marked({
+    extensions: [
+      {
+        name: 'mathBlock',
+        level: 'block',
+        // Only at block boundaries. A broad start() would interrupt paragraphs
+        // on mid-line display math; those are handled by the inline extension.
+        start(src) {
+          if (src.startsWith('$$') || src.startsWith('\\[')) return 0;
+          return undefined;
+        },
+        tokenizer(src) {
+          const match = DISPLAY_DOLLAR_RE.exec(src) ?? DISPLAY_BRACKET_RE.exec(src);
+          if (!match) return undefined;
+          const text = match[1].trim();
+          if (!text) return undefined;
+          return mathToken('mathBlock', match[0], text, true);
+        },
+        renderer(token) {
+          return `<div class="math math-display">${escapeHtml(String(token.text))}</div>\n`;
+        },
+      },
+      {
+        name: 'mathInline',
+        level: 'inline',
+        start(src) {
+          return earliestIndex(
+            indexOfNeedle(src, '$$'),
+            indexOfNeedle(src, '\\['),
+            indexOfNeedle(src, '\\('),
+            indexOfDollarInline(src),
+          );
+        },
+        tokenizer(src) {
+          if (src.startsWith('$$')) {
+            const match = DISPLAY_DOLLAR_RE.exec(src);
+            if (!match) return undefined;
+            const text = match[1].trim();
+            if (!text) return undefined;
+            return mathToken('mathInline', match[0], text, true);
+          }
+          if (src.startsWith('\\[')) {
+            const match = DISPLAY_BRACKET_RE.exec(src);
+            if (!match) return undefined;
+            const text = match[1].trim();
+            if (!text) return undefined;
+            return mathToken('mathInline', match[0], text, true);
+          }
+          if (src.startsWith('\\(')) {
+            const match = INLINE_PAREN_RE.exec(src);
+            if (!match) return undefined;
+            const text = match[1].trim();
+            if (!text) return undefined;
+            return mathToken('mathInline', match[0], text, false);
+          }
+          const match = INLINE_DOLLAR_RE.exec(src);
+          if (!match) return undefined;
+          return mathToken('mathInline', match[0], match[1], false);
+        },
+        renderer(token) {
+          const cls = token.displayMode ? 'math math-display' : 'math math-inline';
+          return `<span class="${cls}">${escapeHtml(String(token.text))}</span>`;
+        },
+      },
+    ],
     renderer: {
       heading(token) {
         const inner = this.parser.parseInline(token.tokens) as string;
@@ -389,9 +502,10 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
   // runs when the HTML string changes never rewrites the tree on search
   // keystrokes, match-index updates, or TOC scrollspy.
   //
-  // After the HTML lands, mermaid fences are rendered in-place. That mutates
-  // the tree (source → SVG), so `paneDomGen` bumps when the pane is stable
-  // again and the search adapter can recollect ranges against the final DOM.
+  // After the HTML lands, mermaid fences and math placeholders are rendered
+  // in-place. That mutates the tree (source → SVG / KaTeX DOM), so
+  // `paneDomGen` bumps when the pane is stable again and the search adapter
+  // can recollect ranges against the final DOM.
   const [paneDomGen, setPaneDomGen] = useState(0);
   useLayoutEffect(() => {
     if (!isMarkdown) return;
@@ -400,18 +514,51 @@ export function FileViewer({ filePath, baseCwd }: FileViewerProps) {
     el.innerHTML = markdownHtml;
 
     let cancelled = false;
-    const nodes = Array.from(el.querySelectorAll<HTMLElement>('pre.mermaid'));
-    if (nodes.length === 0) return;
+    const mermaidNodes = Array.from(el.querySelectorAll<HTMLElement>('pre.mermaid'));
+    const mathNodes = Array.from(el.querySelectorAll<HTMLElement>('.math'));
+    if (mermaidNodes.length === 0 && mathNodes.length === 0) return;
 
     void (async () => {
       try {
-        const mermaid = await getMermaid();
-        if (cancelled) return;
-        const live = nodes.filter((n) => n.isConnected);
-        if (live.length === 0) return;
-        await mermaid.run({ nodes: live, suppressErrors: true });
-      } catch (err) {
-        console.error('Mermaid render failed', err);
+        await Promise.all([
+          (async () => {
+            if (mermaidNodes.length === 0) return;
+            try {
+              const mermaid = await getMermaid();
+              if (cancelled) return;
+              const live = mermaidNodes.filter((n) => n.isConnected);
+              if (live.length === 0) return;
+              await mermaid.run({ nodes: live, suppressErrors: true });
+            } catch (err) {
+              console.error('Mermaid render failed', err);
+            }
+          })(),
+          (async () => {
+            if (mathNodes.length === 0) return;
+            try {
+              const katex = await getKatex();
+              if (cancelled) return;
+              for (const node of mathNodes) {
+                if (!node.isConnected) continue;
+                const tex = node.textContent ?? '';
+                const displayMode = node.classList.contains('math-display');
+                try {
+                  // renderToString avoids katex.render's document.createElement
+                  // path (quirks-mode warnings under happy-dom; same HTML out).
+                  node.innerHTML = katex.renderToString(tex, {
+                    displayMode,
+                    throwOnError: true,
+                    trust: false,
+                  });
+                } catch {
+                  node.classList.add('math-error');
+                }
+              }
+            } catch (err) {
+              console.error('KaTeX render failed', err);
+            }
+          })(),
+        ]);
       } finally {
         if (!cancelled) setPaneDomGen((g) => g + 1);
       }
