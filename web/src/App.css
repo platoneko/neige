@@ -119,11 +119,6 @@
   background: var(--bg-hover);
 }
 
-.conv-dot-btn.active {
-  background: var(--blue-dim);
-  border-color: rgba(56, 139, 253, 0.4);
-}
-
 /* Collapse toggle button */
 .sidebar-collapse-btn {
   background: none;
@@ -255,14 +250,39 @@
   background: var(--bg-hover);
 }
 
+/* Current panel is marked by `.conv-current-tag`, not a strong row fill —
+   fill alone vanished under `.busy` opacity and was easy to miss. */
 .conv-item.active {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.conv-dot-btn.active {
   background: var(--blue-dim);
   border-color: rgba(56, 139, 253, 0.4);
-  box-shadow: inset 0 0 0 1px rgba(56, 139, 253, 0.1);
 }
 
 .conv-item.open:not(.active) {
   border-left: 2px solid var(--blue);
+}
+
+.conv-current-tag {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--blue);
+  background: rgba(56, 139, 253, 0.18);
+  border: 1px solid rgba(56, 139, 253, 0.55);
+  pointer-events: none;
+  user-select: none;
 }
 
 /* User focus set — orange so it never reads as "active panel" (blue). */
@@ -276,10 +296,10 @@
   color: var(--orange);
 }
 
-/* Focus + active: keep active blue fill, keep orange title/outline for the set. */
+/* Focus + active: keep orange focus outline; current is the tag, not a blue fill. */
 .conv-item.focused.active {
-  background: var(--blue-dim);
-  border-color: rgba(56, 139, 253, 0.4);
+  background: var(--orange-dim);
+  border-color: transparent;
   outline: 1px solid rgba(224, 135, 58, 0.55);
   outline-offset: -1px;
 }
@@ -854,9 +874,11 @@
 
 /* Working: recede. The agent is fine and doesn't need you. Everything else
    (idle / awaiting_input / unknown) stays at full opacity — awaiting_input
-   earns attention by not dimming, standing out against dimmed siblings. */
-.conv-item.busy,
-.conv-dot-btn.busy {
+   earns attention by not dimming, standing out against dimmed siblings.
+   Active (the panel you're looking at) stays bright: dimming the selection
+   cue makes the current agent hard to find, especially while it's working. */
+.conv-item.busy:not(.active),
+.conv-dot-btn.busy:not(.active) {
   opacity: 0.45;
   transition: opacity 0.3s ease;
 }
