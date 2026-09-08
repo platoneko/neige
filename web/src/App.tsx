@@ -10,6 +10,7 @@ import { QuickLauncher } from './components/QuickLauncher';
 import { useConversations } from './hooks/useConversations';
 import { useConfig, type RecentFile } from './hooks/useConfig';
 import { groupIntoTasks, tabTitle, type OpenFile } from './tasks';
+import { panelIdsClosedByDelete } from './layoutSanitize';
 import { pruneFocus, toggleFocus } from './focus';
 import type { ConvInfo, CreateConvRequest } from './types';
 import { OpenFileProvider } from './OpenFileContext';
@@ -305,14 +306,19 @@ function App() {
     // Panel is already removed by dockview; syncTabState updates sidebar
   }, []);
 
-  // Sidebar delete = real delete with confirmation
+  // Sidebar delete = real delete with confirmation. Close every panel the
+  // server will cascade-remove up front — waiting for the post-refresh
+  // cleanup effect left child tabs (e.g. "gravity: issue") stranded in the
+  // tab bar after they had already vanished from the sidebar.
   const handleDeleteConfirm = useCallback(async () => {
     if (!deleteTarget) return;
     const { id, title } = deleteTarget;
     const api = dockviewApiRef.current;
     if (api) {
-      const panel = api.getPanel(id);
-      if (panel) api.removePanel(panel);
+      const closing = panelIdsClosedByDelete(id, conversations, openFiles);
+      for (const panel of [...api.panels]) {
+        if (closing.has(panel.id)) api.removePanel(panel);
+      }
     }
     try {
       await remove(id);
@@ -324,7 +330,7 @@ function App() {
       });
     }
     setDeleteTarget(null);
-  }, [deleteTarget, remove, toast]);
+  }, [deleteTarget, remove, toast, conversations, openFiles]);
 
   // Sync conversation titles → dockview tab titles. Renaming a task also
   // reflows its children's tabs, since their prefix is the task name.
@@ -341,9 +347,9 @@ function App() {
 
   // Panels don't outlive their session. A conversation panel whose session
   // is gone, and a file panel whose owning agent is gone, both lose their
-  // place in the tree. `handleDeleteConfirm` only removes the one panel the
-  // user clicked, so this is what closes a task's child agents when the
-  // delete cascades — and what handles sessions removed by another client.
+  // place in the tree. `handleDeleteConfirm` already closes the local
+  // cascade; this effect covers sessions removed by another client / MCP
+  // and any panel the confirm path missed.
   // Two gates, two jobs. `loadedOnce` is what stops a list that hasn't
   // arrived from reading as "every session is gone": layout restore issues
   // its own fetch and can finish first, and panels removed here are then
