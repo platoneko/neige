@@ -8,6 +8,7 @@ import {
 import 'dockview-core/dist/styles/dockview.css';
 import { useTerminal } from '../hooks/useTerminal';
 import { listConversations, loadLayout, saveLayout } from '../api';
+import { sanitizeLayout, type SerializedLayout } from '../layoutSanitize';
 import { FileViewer } from './FileViewer';
 import { WebView } from './WebView';
 import { ChatPanel } from './ChatPanel';
@@ -87,37 +88,11 @@ export function TerminalPanel({ dockviewApiRef, onTabClose, onTabStateChange }: 
           loadLayout(),
           listConversations(),
         ]);
-        const layout = rawLayout as
-          | {
-              panels?: Record<string, unknown>;
-              grid?: { root: Record<string, unknown> };
-            }
-          | null;
-        if (layout) {
-          const validIds = new Set(convs.map((c) => c.id));
-          // Remove panels that reference non-existent sessions
-          if (layout.panels) {
-            layout.panels = Object.fromEntries(
-              Object.entries(layout.panels).filter(([id]) => validIds.has(id))
-            );
-          }
-          // Clean grid leaves that reference removed panels
-          if (layout.grid) {
-            const cleanNode = (node: Record<string, unknown>): boolean => {
-              if (node.type === 'leaf' && Array.isArray(node.data)) {
-                node.data = (node.data as { id: string }[]).filter(
-                  (d) => validIds.has(d.id)
-                );
-                return (node.data as unknown[]).length > 0;
-              }
-              if (node.type === 'branch' && Array.isArray(node.data)) {
-                node.data = (node.data as Record<string, unknown>[]).filter(cleanNode);
-                return (node.data as unknown[]).length > 0;
-              }
-              return true;
-            };
-            cleanNode(layout.grid.root);
-          }
+        if (rawLayout && typeof rawLayout === 'object') {
+          const layout = sanitizeLayout(
+            rawLayout as SerializedLayout,
+            new Set(convs.map((c) => c.id)),
+          );
           // Only restore if there are still valid panels
           const hasPanels = Object.keys(layout.panels ?? {}).length > 0;
           if (hasPanels) {
