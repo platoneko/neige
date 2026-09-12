@@ -250,11 +250,12 @@
   background: var(--bg-hover);
 }
 
-/* Current panel is marked by `.conv-current-tag`, not a strong row fill —
-   fill alone vanished under `.busy` opacity and was easy to miss. */
+/* Current panel: full-card blue border + slim right-edge `>`. Border (not fill)
+   survives `.busy` opacity so the selection cue stays findable. Blue stays
+   distinct from focus orange. */
 .conv-item.active {
   background: transparent;
-  border-color: transparent;
+  border: 2px solid var(--blue);
   box-shadow: none;
 }
 
@@ -270,17 +271,11 @@
 .conv-current-tag {
   flex-shrink: 0;
   align-self: center;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   font-family: var(--font-sans);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  line-height: 1.3;
-  padding: 2px 7px;
-  border-radius: 999px;
+  line-height: 1;
   color: var(--blue);
-  background: rgba(56, 139, 253, 0.18);
-  border: 1px solid rgba(56, 139, 253, 0.55);
   pointer-events: none;
   user-select: none;
 }
@@ -296,10 +291,10 @@
   color: var(--orange);
 }
 
-/* Focus + active: keep orange focus outline; current is the tag, not a blue fill. */
+/* Focus + active: orange outline (focus) + blue border (current). */
 .conv-item.focused.active {
   background: var(--orange-dim);
-  border-color: transparent;
+  border: 2px solid var(--blue);
   outline: 1px solid rgba(224, 135, 58, 0.55);
   outline-offset: -1px;
 }

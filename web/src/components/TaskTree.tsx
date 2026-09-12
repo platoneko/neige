@@ -178,11 +178,6 @@ function AgentRow({
           <span className="conv-time">{timeAgo(conv.created_at)}</span>
         </span>
       </div>
-      {active && (
-        <span className="conv-current-tag" aria-label="Current panel">
-          Current
-        </span>
-      )}
       <div className="conv-actions">
         {isTask && onNewAgent && (
           <button
@@ -221,6 +216,11 @@ function AgentRow({
           ×
         </button>
       </div>
+      {active && (
+        <span className="conv-current-tag" aria-label="Current panel">
+          &gt;
+        </span>
+      )}
     </div>
   );
 }
