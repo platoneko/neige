@@ -229,3 +229,48 @@ async fn chat_resume_flag_round_trips_to_runner_argv() {
 
     let _ = child.kill().await;
 }
+
+#[tokio::test]
+async fn chat_kill_tears_down_runner_and_daemon() {
+    // The server-side delete path (`request_kill`) must end the runner and
+    // the daemon in chat mode too, not just hang up a socket.
+    if !node_available() {
+        eprintln!("skipping chat_kill_tears_down_runner_and_daemon: node not on PATH");
+        return;
+    }
+    let stub = stub_runner_path();
+    let daemon_bin = env!("CARGO_BIN_EXE_neige-session-daemon");
+    let id = Uuid::new_v4();
+    let sock = std::env::temp_dir().join(format!("neige-chat-kill-{id}.sock"));
+    let _ = std::fs::remove_file(&sock);
+
+    let mut child = Command::new(daemon_bin)
+        .args(["--mode", "chat"])
+        .args(["--id", &id.to_string()])
+        .args(["--sock", &sock.to_string_lossy()])
+        .args(["--runner-path", &stub.to_string_lossy()])
+        .args(["--cwd", workspace_root().to_string_lossy().as_ref()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn daemon");
+
+    let mut stream = None;
+    for _ in 0..150 {
+        if let Ok(s) = UnixStream::connect(&sock).await {
+            stream = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    neige_session::request_kill(stream.expect("daemon did not bind socket within 6s")).await;
+
+    let exited = timeout(Duration::from_secs(5), child.wait()).await;
+    assert!(exited.is_ok(), "daemon did not exit after Kill");
+    assert!(
+        !sock.exists(),
+        "daemon left stale socket at {}",
+        sock.display()
+    );
+}
