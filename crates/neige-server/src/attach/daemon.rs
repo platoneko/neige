@@ -19,7 +19,7 @@ use tokio::net::UnixStream;
 use tokio::process::Command;
 use uuid::Uuid;
 
-use neige_session::{ClientMsg, write_frame};
+use neige_session::request_kill;
 
 /// Compute the socket path for a given session id. Callers don't need to
 /// create the parent dir; [`create_session`] handles that.
@@ -207,20 +207,13 @@ async fn spawn_daemon(
     Err(format!("daemon for {id} did not become ready"))
 }
 
-/// Best-effort kill. Opens the daemon's socket, sends Attach (required first
-/// frame) then Kill, and drops. The daemon SIGHUPs the child; the child exit
-/// tears down the daemon.
+/// Best-effort kill. Opens the daemon's socket and runs the Kill handshake
+/// (see `neige_session::request_kill`). A missing socket means the session
+/// is already gone.
 pub async fn kill_session(id: &Uuid) {
     let Ok(sock) = UnixStream::connect(sock_path(id)).await else {
-        // Already gone.
         return;
     };
-    let (_, mut wr) = sock.into_split();
-    let _ = write_frame(&mut wr, &ClientMsg::Attach { cols: 80, rows: 24 }).await;
-    let _ = write_frame(&mut wr, &ClientMsg::Kill).await;
-    // Give the kernel a beat to flush the bytes before we drop `wr`; some
-    // runtimes race the FIN ahead of tiny pending writes. Cheap insurance.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    drop(wr);
+    request_kill(sock).await;
     tracing::debug!("sent Kill to session daemon {id}");
 }

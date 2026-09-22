@@ -37,7 +37,7 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 use neige_session::{ClientMsg, DaemonMsg, read_frame, write_frame};
@@ -349,10 +349,6 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
     cmd.env("CLICOLOR", "1");
     cmd.env("CLICOLOR_FORCE", "1");
     let child = pair.slave.spawn_command(cmd)?;
-    // Split out a separately-owned killer before the child moves into the
-    // waiter task. A ClientMsg::Kill handler calls through this.
-    let killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> =
-        Arc::new(Mutex::new(child.clone_killer()));
     drop(pair.slave);
 
     let buffer: SharedBuffer = Arc::new(Mutex::new(ByteBuffer::new(cli.buffer_bytes)));
@@ -394,13 +390,14 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
     notify_ready(cli.ready_fd);
 
     // ---- Accept loop ----
+    let kill_requested = Arc::new(Notify::new());
     let accept_task = tokio::spawn(accept_loop(
         listener,
         event_tx.clone(),
         buffer.clone(),
         master.clone(),
         stdin_tx.clone(),
-        killer.clone(),
+        kill_requested.clone(),
         foreground.clone(),
     ));
 
@@ -408,7 +405,7 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
     // daemon still runs the sock-unlink path below. Matters in
     // NEIGE_TIE_TO_PARENT=1 mode where the kernel sends SIGTERM on parent
     // death — without this handler the sock file would linger until cron
-    // reaped it.
+    // reaped it. A client's Kill is the same request by another route.
     let mut shutdown_rx = shutdown_rx;
     let signalled = tokio::select! {
         _ = &mut shutdown_rx => {
@@ -417,6 +414,10 @@ async fn run_terminal(cli: Cli) -> anyhow::Result<()> {
         }
         _ = wait_termination_signal() => {
             tracing::info!("received termination signal, shutting down");
+            true
+        }
+        _ = kill_requested.notified() => {
+            tracing::info!("client requested Kill, shutting down");
             true
         }
     };
@@ -537,19 +538,26 @@ async fn run_chat(cli: Cli) -> anyhow::Result<()> {
 
     notify_ready(cli.ready_fd);
 
+    let kill_requested = Arc::new(Notify::new());
     let accept_task = tokio::spawn(accept_chat_loop(
         listener,
         event_tx.clone(),
         buffer.clone(),
         stdin_tx.clone(),
+        kill_requested.clone(),
     ));
 
     // Why: same signal-vs-child-exit race as in run_terminal — SIGTERM must
     // reach the sock-unlink path so tie-to-parent kills don't leak sock files.
+    // A client's Kill ends the same way: our exit closes the runner's stdin,
+    // and EOF is how the runner learns to leave its query() loop.
     tokio::select! {
         _ = shutdown_rx => tracing::info!("chat runner exited, shutting down"),
         _ = wait_termination_signal() => {
             tracing::info!("received termination signal, shutting down (chat mode)");
+        }
+        _ = kill_requested.notified() => {
+            tracing::info!("client requested Kill, shutting down (chat mode)");
         }
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -877,7 +885,7 @@ async fn accept_loop(
     buffer: SharedBuffer,
     master: SharedMaster,
     stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
-    killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    kill_requested: Arc<Notify>,
     foreground: SharedForeground,
 ) {
     loop {
@@ -887,12 +895,19 @@ async fn accept_loop(
                 let buffer = buffer.clone();
                 let master = master.clone();
                 let stdin_tx = stdin_tx.clone();
-                let killer = killer.clone();
+                let kill_requested = kill_requested.clone();
                 let foreground = foreground.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_client(sock, event_rx, buffer, master, stdin_tx, killer, foreground)
-                            .await
+                    if let Err(e) = handle_client(
+                        sock,
+                        event_rx,
+                        buffer,
+                        master,
+                        stdin_tx,
+                        kill_requested,
+                        foreground,
+                    )
+                    .await
                     {
                         tracing::debug!(error = %e, "client ended");
                     }
@@ -911,6 +926,7 @@ async fn accept_chat_loop(
     event_tx: broadcast::Sender<ChatEvt>,
     buffer: SharedEventBuffer,
     stdin_tx: mpsc::UnboundedSender<ChatControl>,
+    kill_requested: Arc<Notify>,
 ) {
     loop {
         match listener.accept().await {
@@ -918,8 +934,11 @@ async fn accept_chat_loop(
                 let event_rx = event_tx.subscribe();
                 let buffer = buffer.clone();
                 let stdin_tx = stdin_tx.clone();
+                let kill_requested = kill_requested.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_chat_client(sock, event_rx, buffer, stdin_tx).await {
+                    if let Err(e) =
+                        handle_chat_client(sock, event_rx, buffer, stdin_tx, kill_requested).await
+                    {
                         tracing::debug!(error = %e, "chat client ended");
                     }
                 });
@@ -938,7 +957,7 @@ async fn handle_client(
     buffer: SharedBuffer,
     master: SharedMaster,
     stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
-    killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    kill_requested: Arc<Notify>,
     foreground: SharedForeground,
 ) -> anyhow::Result<()> {
     let (mut rd, mut wr) = sock.into_split();
@@ -1023,8 +1042,9 @@ async fn handle_client(
                 // Ignore re-attach on a live connection.
             }
             ClientMsg::Kill => {
-                tracing::info!("client requested Kill; signaling child");
-                kill_child(&master, &killer);
+                // Handled by run_terminal, which hangs up the whole PTY
+                // session the same way it does on SIGTERM.
+                kill_requested.notify_one();
             }
             ClientMsg::ChatUserMessage { .. }
             | ClientMsg::ChatStop
@@ -1047,6 +1067,7 @@ async fn handle_chat_client(
     mut event_rx: broadcast::Receiver<ChatEvt>,
     buffer: SharedEventBuffer,
     stdin_tx: mpsc::UnboundedSender<ChatControl>,
+    kill_requested: Arc<Notify>,
 ) -> anyhow::Result<()> {
     let (mut rd, mut wr) = sock.into_split();
 
@@ -1121,11 +1142,10 @@ async fn handle_chat_client(
                 // Ignore re-attach on a live connection.
             }
             ClientMsg::Kill => {
-                tracing::info!("client requested Kill in chat mode; closing runner stdin");
-                // Drop the stdin sender → writer task drops the ChildStdin →
-                // runner sees EOF and exits its query() loop. Child-waiter
-                // then broadcasts Exit and we shut down.
-                drop(stdin_tx);
+                // Handled by run_chat. Dropping this connection's sender
+                // clone could never EOF the runner: the accept loop and
+                // run_chat hold clones of their own.
+                kill_requested.notify_one();
                 break;
             }
             // Wrong-mode frames — quietly ignored.
@@ -1138,36 +1158,6 @@ async fn handle_chat_client(
     down_task.abort();
     let _ = down_task.await;
     Ok(())
-}
-
-/// Try hard to tear down the child. We first SIGHUP the whole process group
-/// (portable-pty marks the child as its own session/pgid via setsid, so the
-/// pgid equals the child pid), then schedule a SIGKILL fallback in case the
-/// child ignored SIGHUP. Signaling the group catches transient subshells
-/// (e.g. `sh -c 'bash'` spawning a separate bash process) that a single-pid
-/// kill would miss.
-fn kill_child(
-    master: &SharedMaster,
-    killer: &Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
-) {
-    let pgid = master.lock().ok().and_then(|m| m.process_group_leader());
-    if let Some(pgid) = pgid {
-        // SAFETY: killpg-style negative pid targets the process group with
-        // the matching id. We created this pgid via setsid at spawn time.
-        unsafe {
-            libc::kill(-pgid, libc::SIGHUP);
-        }
-        // Hard fallback in case the child traps SIGHUP and keeps running.
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
-            }
-        });
-    } else if let Ok(mut k) = killer.lock() {
-        // Last-resort fallback through portable-pty's killer.
-        let _ = k.kill();
-    }
 }
 
 fn apply_resize(master: &SharedMaster, cols: u16, rows: u16) {

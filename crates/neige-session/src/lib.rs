@@ -14,9 +14,11 @@
 pub mod stream_json;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::UnixStream;
 use uuid::Uuid;
 
 /// Cap on a single frame. Anything larger is either a bug or hostile.
@@ -121,6 +123,36 @@ where
     r.read_exact(&mut buf).await?;
     let (msg, _) = bincode::serde::decode_from_slice(&buf, bincode_config())?;
     Ok(msg)
+}
+
+/// Upper bound on how long `request_kill` stays attached waiting for the
+/// session to die. Covers the daemon's hangup grace plus its SIGKILL.
+const KILL_WAIT: Duration = Duration::from_secs(5);
+
+/// Client side of `ClientMsg::Kill` on an already-connected daemon socket:
+/// Attach (required first frame), Kill, then stay attached until the daemon
+/// reports `ChildExited` or closes the socket, bounded by [`KILL_WAIT`].
+///
+/// Why we keep reading: the daemon answers Attach with a `Hello` carrying
+/// the whole replay buffer, which can be far larger than the socket buffers.
+/// A client that never reads leaves that write blocked, and a client that
+/// hangs up makes it fail — either way the daemon never reaches the frame
+/// loop that would see the Kill. Draining frames is what lets it get there.
+pub async fn request_kill(stream: UnixStream) {
+    let (mut rd, mut wr) = stream.into_split();
+    let _ = write_frame(&mut wr, &ClientMsg::Attach { cols: 80, rows: 24 }).await;
+    let _ = write_frame(&mut wr, &ClientMsg::Kill).await;
+    let drain = async {
+        loop {
+            match read_frame::<DaemonMsg, _>(&mut rd).await {
+                Ok(DaemonMsg::ChildExited { .. }) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    };
+    // Best-effort: on timeout the daemon has long since read the Kill and its
+    // own SIGKILL fallback finishes the job; nothing more for us to do here.
+    let _ = tokio::time::timeout(KILL_WAIT, drain).await;
 }
 
 #[cfg(test)]
