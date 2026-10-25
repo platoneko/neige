@@ -6,7 +6,7 @@ import { FitAddon } from '@xterm/addon-fit';
 // Canvas renderer: xterm 6 defaults to DOM, which drifts CJK/box-drawing
 // right edges (letter-spacing on text runs). See tryEnableCanvasRenderer.
 import { CanvasAddon } from '@xterm/addon-canvas';
-import { writeClipboardApiOnly, writeClipboardSync } from './clipboard';
+import { eventCopy, writeClipboardApiOnly, writeClipboardSync } from './clipboard';
 
 /**
  * Enable the canvas renderer. xterm.js 6 ships DomRenderer by default;
@@ -278,9 +278,17 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       try {
         const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);
-        // Stage first. Never selectionCopy here — no user gesture.
-        // Clipboard API only on arrival; selection waits for pointer flush.
+        // Stage first. Never selectionCopy here — it mutates Selection.
         pendingOsc52 = text;
+        // Grok copies on mouse release, so this frame usually arrives while
+        // that pointerup's transient activation is still live (Chrome: ~5s).
+        // eventCopy touches neither Selection nor focus, so try it now —
+        // waiting for the next gesture made the first selection look lost.
+        // Mid-composition it stays staged for the gesture flush.
+        if (!imeComposing && eventCopy(text)) {
+          pendingOsc52 = null;
+          return true;
+        }
         void writeClipboardApiOnly(text).then((ok) => {
           if (ok && pendingOsc52 === text) pendingOsc52 = null;
         });
