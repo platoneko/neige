@@ -12,7 +12,8 @@ import {
 import type { ConvInfo } from '../types';
 import { activityClass, rollUpActivity, type Activity } from '@neige/shared';
 import { isFocused } from '../focus';
-import { staleOverrides, type OpenFile, type TaskGroup } from '../tasks';
+import * as Tooltip from '@radix-ui/react-tooltip';
+import { fileDirHints, staleOverrides, type OpenFile, type TaskGroup } from '../tasks';
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -227,12 +228,16 @@ function AgentRow({
 
 function FileRow({
   file,
+  dirHint,
   nested,
   active,
   onSelect,
   onClose,
 }: {
   file: OpenFile;
+  /** Trailing dir that tells this file apart from same-named open files;
+   *  absent when its name is unique. */
+  dirHint?: string;
   /** True for a child agent's files, which indent one step deeper than a
    *  root agent's. Both kinds render the same `.file-row` and both trail a
    *  `.conv-item` sibling, so depth is a fact about the tree model, not
@@ -244,30 +249,50 @@ function FileRow({
   onSelect: (panelId: string) => void;
   onClose: (panelId: string) => void;
 }) {
+  // Full path in a Radix tooltip, not a native `title`: the browser's own
+  // hover delay (~1s, not configurable) is too slow to scan rows with.
   return (
-    <div
-      className={`conv-item file-row ${nested ? 'file-row-nested' : ''} ${active ? 'active' : ''}`}
-      onClick={() => onSelect(file.panelId)}
-      title={file.filePath}
-    >
-      <span className="file-row-icon">
-        <FileText size={12} strokeWidth={2} />
-      </span>
-      <span className="conv-title">{file.fileName}</span>
-      <div className="conv-actions">
-        <button
-          className="btn-delete"
-          onClick={(e) => {
-            e.stopPropagation();
-            onClose(file.panelId);
-          }}
-          title="Close file"
-          aria-label="Close file"
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <div
+          className={`conv-item file-row ${nested ? 'file-row-nested' : ''} ${active ? 'active' : ''}`}
+          onClick={() => onSelect(file.panelId)}
         >
-          ×
-        </button>
-      </div>
-    </div>
+          <span className="file-row-icon">
+            <FileText size={12} strokeWidth={2} />
+          </span>
+          <span className="file-row-label">
+            <span className="conv-title">{file.fileName}</span>
+            {dirHint && <span className="file-row-hint">{dirHint}</span>}
+          </span>
+          <div className="conv-actions">
+            <button
+              className="btn-delete"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose(file.panelId);
+              }}
+              title="Close file"
+              aria-label="Close file"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content
+          side="right"
+          align="center"
+          sideOffset={6}
+          collisionPadding={8}
+          className="file-row-tip"
+        >
+          {file.filePath}
+          <Tooltip.Arrow className="file-row-tip-arrow" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
   );
 }
 
@@ -316,6 +341,14 @@ export function TaskTree({
     return map;
   }, [openFiles]);
 
+  // Collisions count across the whole sidebar, not per agent: two README.md
+  // rows under different agents are just as hard to tell apart at a glance.
+  // Files without an owner never render, so they can't collide.
+  const dirHints = useMemo(
+    () => fileDirHints(openFiles.filter((f) => f.ownerId)),
+    [openFiles],
+  );
+
   const autoExpand = useMemo(() => {
     const hasContent = (c: ConvInfo) =>
       openTabs.includes(c.id) || (filesOf.get(c.id)?.length ?? 0) > 0;
@@ -352,7 +385,7 @@ export function TaskTree({
   const toggle = (rowId: string) =>
     setOverride((prev) => new Map(prev).set(rowId, !isExpanded(rowId)));
 
-  return (
+  const tree = (
     <div className="conv-list">
       {tasks.map((task) => {
         const rootFiles = filesOf.get(task.root.id) ?? [];
@@ -385,6 +418,7 @@ export function TaskTree({
                   <FileRow
                     key={f.panelId}
                     file={f}
+                    dirHint={dirHints.get(f.panelId)}
                     nested={false}
                     active={activeTab === f.panelId}
                     onSelect={onSelectFile}
@@ -416,6 +450,7 @@ export function TaskTree({
                           <FileRow
                             key={f.panelId}
                             file={f}
+                            dirHint={dirHints.get(f.panelId)}
                             nested
                             active={activeTab === f.panelId}
                             onSelect={onSelectFile}
@@ -431,5 +466,13 @@ export function TaskTree({
         );
       })}
     </div>
+  );
+
+  // skipDelayDuration lets the file-path tooltip follow the pointer row to
+  // row with no fresh wait, matching the markdown outline's tooltips.
+  return (
+    <Tooltip.Provider delayDuration={150} skipDelayDuration={80}>
+      {tree}
+    </Tooltip.Provider>
   );
 }

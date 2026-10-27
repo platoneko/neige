@@ -1960,7 +1960,8 @@
   transition: color 0.1s, background 0.1s;
 }
 
-.file-viewer-md-toc-tip {
+.file-viewer-md-toc-tip,
+.file-row-tip {
   z-index: 1000;
   padding: 6px 10px;
   background: var(--bg-secondary);
@@ -1975,8 +1976,14 @@
   user-select: none;
 }
 
-.file-viewer-md-toc-tip-arrow {
+.file-viewer-md-toc-tip-arrow,
+.file-row-tip-arrow {
   fill: var(--bg-secondary);
+}
+
+/* Paths have no spaces to wrap at; break anywhere so a long one stays whole. */
+.file-row-tip {
+  overflow-wrap: anywhere;
 }
 
 .file-viewer-md-toc-entry[data-level="1"] { padding-left: 6px; }
@@ -2400,8 +2407,38 @@
   flex-shrink: 0;
 }
 
-.conv-item.file-row .conv-title {
+/* Name + dir hint fill the row so the close button stays right-aligned. */
+.file-row-label {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.conv-item.file-row .conv-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* With a dir hint, the hint gives way first and clips from the right: its
+   leftmost segment is the one that tells same-named files apart. The name
+   must not shrink at all meanwhile — any share of the overflow, however
+   small, ellipsizes it — so it is capped to leave the hint its min-width
+   instead, and only clips once the hint is down to that. */
+.conv-item.file-row .conv-title:has(+ .file-row-hint) {
+  flex-shrink: 0;
+  max-width: calc(100% - 4ch - 6px);
+}
+
+.file-row-hint {
+  flex: 0 1 auto;
+  min-width: 4ch;
+  font-size: 11px;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -22,6 +22,47 @@ export interface OpenFile {
 }
 
 /**
+ * Dir hints for open files whose names collide in the sidebar, keyed by
+ * panelId. Each colliding file gets the shortest trailing run of its dir
+ * that no same-named file shares; a file with a unique name gets none.
+ */
+export function fileDirHints(files: OpenFile[]): Map<string, string> {
+  const byName = new Map<string, OpenFile[]>();
+  for (const f of files) {
+    const group = byName.get(f.fileName);
+    if (group) group.push(f);
+    else byName.set(f.fileName, [f]);
+  }
+
+  const hints = new Map<string, string>();
+  for (const group of byName.values()) {
+    if (group.length < 2) continue;
+    const dirs = group.map((f) => f.filePath.split('/').filter(Boolean).slice(0, -1));
+    for (const [i, f] of group.entries()) {
+      const hint = uniqueDirSuffix(dirs, i);
+      if (hint !== undefined) hints.set(f.panelId, hint);
+    }
+  }
+  return hints;
+}
+
+function uniqueDirSuffix(dirs: string[][], i: number): string | undefined {
+  const maxDepth = Math.max(...dirs.map((d) => d.length)) + 1;
+  for (let k = 1; k <= maxDepth; k++) {
+    const mine = dirSuffix(dirs[i], k);
+    if (dirs.every((d, j) => j === i || dirSuffix(d, k) !== mine)) return mine;
+  }
+  // Only reachable when two same-named files share a dir, i.e. the same path.
+  return undefined;
+}
+
+// Past the dir's own depth the suffix is the whole dir, written absolute so
+// it can't equal another file's relative tail ('/x' vs 'y/x').
+function dirSuffix(dir: string[], k: number): string {
+  return k > dir.length ? `/${dir.join('/')}` : dir.slice(-k).join('/');
+}
+
+/**
  * Group a flat conversation list into tasks, preserving the incoming order
  * of roots. Every conversation reaches the output: one whose parent is not
  * itself a root — an orphan left by another client's delete, illegal

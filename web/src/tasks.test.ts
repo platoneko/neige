@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupIntoTasks, staleOverrides, tabTitle } from './tasks';
+import { fileDirHints, groupIntoTasks, staleOverrides, tabTitle, type OpenFile } from './tasks';
 import type { ConvInfo } from './types';
 
 function conv(id: string, title: string, parent_id: string | null = null): ConvInfo {
@@ -140,5 +140,53 @@ describe('staleOverrides', () => {
     const prev = new Map([['a', true]]);
     const next = new Map([['a', true]]);
     expect(staleOverrides(prev, next)).toEqual([]);
+  });
+});
+
+describe('fileDirHints', () => {
+  function file(filePath: string): OpenFile {
+    return {
+      panelId: `file:${filePath}`,
+      filePath,
+      fileName: filePath.slice(filePath.lastIndexOf('/') + 1),
+    };
+  }
+
+  function hintsOf(paths: string[]): Record<string, string> {
+    const hints = fileDirHints(paths.map(file));
+    return Object.fromEntries(paths.flatMap((p) => {
+      const hint = hints.get(`file:${p}`);
+      return hint === undefined ? [] : [[p, hint]];
+    }));
+  }
+
+  it('gives no hint to a name that appears once', () => {
+    expect(hintsOf(['/repo/README.md', '/repo/web/App.tsx'])).toEqual({});
+  });
+
+  it('hints the parent dir when that alone tells same-named files apart', () => {
+    expect(hintsOf(['/repo/neige/README.md', '/repo/neige/web/README.md'])).toEqual({
+      '/repo/neige/README.md': 'neige',
+      '/repo/neige/web/README.md': 'web',
+    });
+  });
+
+  it('climbs past a shared parent name, each file only as far as it needs', () => {
+    expect(
+      hintsOf(['/r/a/docs/README.md', '/r/b/docs/README.md', '/r/c/README.md']),
+    ).toEqual({
+      '/r/a/docs/README.md': 'a/docs',
+      '/r/b/docs/README.md': 'b/docs',
+      '/r/c/README.md': 'c',
+    });
+  });
+
+  it('shows the full dir once a shorter path runs out of segments', () => {
+    // '/x' is all of the first file's dir, so its hint becomes absolute to
+    // stay distinct from the other file's 'y/x'.
+    expect(hintsOf(['/x/README.md', '/y/x/README.md'])).toEqual({
+      '/x/README.md': '/x',
+      '/y/x/README.md': 'y/x',
+    });
   });
 });
