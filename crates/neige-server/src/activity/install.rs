@@ -1,14 +1,22 @@
-//! Installing neige's hooks into the user's Claude Code settings.
+//! Installing neige's activity reporters into the user's agent configs.
 //!
-//! User-global (`~/.claude/settings.json`) rather than a per-spawn
-//! `--settings` file, because the interesting case is the `claude` a user
-//! types by hand at a shell prompt inside a neige terminal — no command line
-//! of ours ever touches that one. Claude Code merges hooks across settings
-//! sources, so a global install also covers the sessions neige spawns itself.
+//! Two installs, one command:
 //!
-//! Every write is a merge keyed on the shim's path: installing twice is a
-//! no-op, and uninstalling removes only the entries pointing at our shim,
-//! leaving hooks the user configured themselves alone.
+//! * Claude Code / grok: merge into `~/.claude/settings.json`. User-global
+//!   rather than a per-spawn `--settings` file, because the interesting case
+//!   is the `claude` a user types by hand at a shell prompt inside a neige
+//!   terminal — no command line of ours ever touches that one. Claude Code
+//!   merges hooks across settings sources, so a global install also covers
+//!   the sessions neige spawns itself.
+//! * OpenCode: drop `neige-activity.js` into `~/.config/opencode/plugins/`,
+//!   which OpenCode auto-loads. Same reason: an `opencode` typed at the
+//!   prompt has to report too.
+//!
+//! Every Claude write is a merge keyed on the shim's path: installing twice
+//! is a no-op, and uninstalling removes only the entries pointing at our
+//! shim, leaving hooks the user configured themselves alone. The OpenCode
+//! plugin is our file; uninstall deletes it only when it still carries our
+//! marker, so a user-written file of the same name is left alone.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +37,53 @@ pub fn default_shim_path() -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| "neige-server has no parent directory".to_string())?;
     Ok(dir.join("neige-hook"))
+}
+
+/// Marker that must appear in [`OPENCODE_PLUGIN_SOURCE`]. Uninstall uses it
+/// to refuse deleting a file we didn't write.
+pub const OPENCODE_PLUGIN_MARKER: &str =
+    "neige-activity — managed by `neige-server hooks install`";
+
+const OPENCODE_PLUGIN_SOURCE: &str = include_str!("opencode_plugin.js");
+
+/// `~/.config/opencode/plugins/neige-activity.js`, honouring `XDG_CONFIG_HOME`.
+pub fn opencode_plugin_path() -> Result<PathBuf, String> {
+    let config = match std::env::var("XDG_CONFIG_HOME") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => {
+            let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+            Path::new(&home).join(".config")
+        }
+    };
+    Ok(config
+        .join("opencode")
+        .join("plugins")
+        .join("neige-activity.js"))
+}
+
+/// Write the OpenCode activity plugin, replacing any previous neige copy.
+pub fn install_opencode_plugin(path: &Path) -> Result<(), String> {
+    if !OPENCODE_PLUGIN_SOURCE.contains(OPENCODE_PLUGIN_MARKER) {
+        return Err(
+            "opencode_plugin.js is missing its install marker; refusing to install".to_string(),
+        );
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, OPENCODE_PLUGIN_SOURCE)
+        .map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+/// Remove the plugin if — and only if — it still carries our marker.
+pub fn uninstall_opencode_plugin(path: &Path) -> Result<(), String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+    if !text.contains(OPENCODE_PLUGIN_MARKER) {
+        return Ok(());
+    }
+    std::fs::remove_file(path).map_err(|e| format!("removing {}: {e}", path.display()))
 }
 
 /// Point every bound hook at `shim`, replacing any previous neige install.
@@ -227,6 +282,36 @@ mod tests {
         std::fs::write(&settings, "{ not json").unwrap();
         assert!(install(&settings, &shim).is_err());
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn opencode_plugin_install_writes_the_reporter_and_is_idempotent() {
+        let dir = tempdir::Dir::new();
+        let path = dir.path().join("plugins").join("neige-activity.js");
+        install_opencode_plugin(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(OPENCODE_PLUGIN_MARKER));
+        assert!(text.contains("export const NeigeActivityPlugin"));
+        install_opencode_plugin(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn opencode_plugin_uninstall_removes_ours_and_leaves_a_foreign_file() {
+        let dir = tempdir::Dir::new();
+        let ours = dir.path().join("neige-activity.js");
+        let foreign = dir.path().join("foreign.js");
+        install_opencode_plugin(&ours).unwrap();
+        std::fs::write(&foreign, "export const Mine = async () => ({})\n").unwrap();
+        uninstall_opencode_plugin(&ours).unwrap();
+        uninstall_opencode_plugin(&foreign).unwrap();
+        assert!(!ours.exists());
+        assert!(foreign.exists());
+    }
+
+    #[test]
+    fn opencode_plugin_source_still_carries_the_uninstall_marker() {
+        assert!(OPENCODE_PLUGIN_SOURCE.contains(OPENCODE_PLUGIN_MARKER));
     }
 
     /// Minimal self-cleaning temp directory — the workspace has no dev-dep for

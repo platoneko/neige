@@ -5,7 +5,8 @@
 //! whether the session's daemon process is alive. A session is routinely
 //! `Running` and `Idle` at the same time; the sidebar wants both answers.
 //!
-//! The signal comes from Claude Code lifecycle hooks, not from watching PTY
+//! The signal comes from agent lifecycle events (Claude Code hooks, grok's
+//! compatible dialect, and an OpenCode plugin), not from watching PTY
 //! output. That matters more than where the code runs: the byte-rate
 //! heuristic this replaces measured whether the TUI was repainting, and
 //! inferred "idle" from a second of terminal silence — so every pause longer
@@ -133,6 +134,39 @@ pub const HOOK_BINDINGS: &[HookBinding] = &[
     },
 ];
 
+/// OpenCode plugin events. Same projection as [`HOOK_BINDINGS`], but they
+/// must not be written into Claude Code's `settings.json` — Claude looks
+/// those keys up verbatim and does not know these names.
+///
+/// The plugin (`opencode_plugin.js`) flattens OpenCode's `session.status`
+/// `{type:"busy"|"idle"}` into `session.busy` / `session.idle` after
+/// aggregating child sessions, then POSTs them through the same hook
+/// ingest as Claude. `session.idle` is `AwaitingInput` rather than `Idle`
+/// for the same reason `Stop` is: a finished turn means the human is the
+/// bottleneck.
+pub const OPENCODE_EVENT_BINDINGS: &[HookBinding] = &[
+    HookBinding {
+        event: "session.created",
+        matcher: false,
+        activity: Activity::Idle,
+    },
+    HookBinding {
+        event: "session.busy",
+        matcher: false,
+        activity: Activity::Working,
+    },
+    HookBinding {
+        event: "session.idle",
+        matcher: false,
+        activity: Activity::AwaitingInput,
+    },
+    HookBinding {
+        event: "permission.asked",
+        matcher: false,
+        activity: Activity::AwaitingInput,
+    },
+];
+
 impl Activity {
     /// Combine the agent-level reading with the shell-level one.
     ///
@@ -202,6 +236,7 @@ impl Activity {
 pub fn activity_for_hook(event: &str) -> Option<Activity> {
     HOOK_BINDINGS
         .iter()
+        .chain(OPENCODE_EVENT_BINDINGS)
         .find(|b| same_event(b.event, event))
         .map(|b| b.activity)
 }
@@ -356,6 +391,73 @@ mod tests {
     fn unmodeled_hooks_leave_activity_untouched() {
         assert_eq!(activity_for_hook("PreCompact"), None);
         assert_eq!(activity_for_hook(""), None);
+    }
+
+    /// OpenCode has no Claude Code hooks. Before these names were projected,
+    /// its payloads were dropped, activity stayed `Unknown`, and the
+    /// foreground-group fallback pinned the session at Working for the
+    /// whole life of the TUI — the same pin grok had before its event-name
+    /// dialect was accepted.
+    #[test]
+    fn opencode_turn_boundaries_drive_the_sidebar() {
+        assert_eq!(activity_for_hook("session.created"), Some(Activity::Idle));
+        assert_eq!(activity_for_hook("session.busy"), Some(Activity::Working));
+        assert_eq!(
+            activity_for_hook("session.idle"),
+            Some(Activity::AwaitingInput)
+        );
+        assert_eq!(
+            activity_for_hook("permission.asked"),
+            Some(Activity::AwaitingInput)
+        );
+    }
+
+    #[test]
+    fn opencode_plugin_apply_event_aggregates_child_sessions() {
+        let test = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/activity/opencode_plugin.test.mjs");
+        let output = std::process::Command::new("node")
+            .args(["--test"])
+            .arg(&test)
+            .output()
+            .expect("node is required to test the OpenCode plugin");
+        assert!(
+            output.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn opencode_and_claude_event_names_do_not_collide() {
+        for oc in OPENCODE_EVENT_BINDINGS {
+            for cl in HOOK_BINDINGS {
+                assert!(
+                    !same_event(oc.event, cl.event),
+                    "{} collides with {}",
+                    oc.event,
+                    cl.event
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opencode_events_do_not_enter_the_claude_settings_file() {
+        // HOOK_BINDINGS generates Claude Code's settings.json. OpenCode's
+        // names live in a separate table so they cannot leak into a file
+        // Claude Code looks up verbatim.
+        let v = settings_hooks_json("/usr/bin/neige-hook");
+        let hooks = v["hooks"].as_object().unwrap();
+        for event in ["session.created", "session.busy", "session.idle", "permission.asked"]
+        {
+            assert!(
+                !hooks.contains_key(event),
+                "{event} must not appear in Claude Code settings"
+            );
+        }
+        assert_eq!(hooks.len(), HOOK_BINDINGS.len());
     }
 
     #[test]
