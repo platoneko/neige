@@ -11,6 +11,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // web/node_modules.
 export default defineConfig({
   plugins: [react()],
+  // web/src files resolve web/tsconfig.json, a references-only stub with no
+  // "jsx" setting, so esbuild would fall back to classic React.createElement.
+  // Match tsconfig.app.json's react-jsx.
+  esbuild: { jsx: 'automatic' },
   resolve: {
     alias: {
       '@neige/shared': path.resolve(__dirname, '../packages/neige-web-shared/src'),
