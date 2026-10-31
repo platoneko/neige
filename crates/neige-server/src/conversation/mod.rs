@@ -182,7 +182,7 @@ pub struct Conversation {
     pub mode: SessionMode,
     pub client: Option<SessionClient>,
     pub chat_client: Option<ChatSessionClient>,
-    /// Projected from Claude Code lifecycle hooks; see [`crate::activity`].
+    /// Projected from agent lifecycle events; see [`crate::activity`].
     /// Not persisted — a session reloaded from disk starts at `Unknown` and
     /// re-populates on the first hook its agent fires.
     pub activity: Activity,

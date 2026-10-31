@@ -206,7 +206,7 @@ enum Command {
         #[command(subcommand)]
         cmd: AuthCmd,
     },
-    /// Claude Code lifecycle hooks, which drive each session's activity dot
+    /// Agent lifecycle hooks, which drive each session's activity dot
     Hooks {
         #[command(subcommand)]
         cmd: HooksCmd,
@@ -215,16 +215,18 @@ enum Command {
 
 #[derive(Subcommand)]
 enum HooksCmd {
-    /// Merge neige's hooks into ~/.claude/settings.json. Needed once per
-    /// machine; installing globally is what lets neige see a `claude` you
-    /// start by hand at a shell prompt, not just the ones it spawns.
+    /// Merge neige's hooks into ~/.claude/settings.json and drop the
+    /// OpenCode activity plugin into ~/.config/opencode/plugins/. Needed
+    /// once per machine; installing globally is what lets neige see a
+    /// `claude` or `opencode` you start by hand at a shell prompt, not
+    /// just the ones it spawns.
     Install {
         /// Path to the neige-hook binary (defaults to alongside this one)
         #[arg(long)]
         shim_path: Option<String>,
     },
-    /// Remove neige's hooks from ~/.claude/settings.json, leaving any hooks
-    /// you configured yourself untouched.
+    /// Remove neige's hooks from ~/.claude/settings.json and the OpenCode
+    /// activity plugin, leaving any hooks you configured yourself untouched.
     Uninstall {
         #[arg(long)]
         shim_path: Option<String>,
@@ -245,8 +247,9 @@ enum AuthCmd {
 }
 
 /// Run `hooks install` / `hooks uninstall`, exiting non-zero on failure so a
-/// setup script notices. Both directions share the path resolution and the
-/// reporting; only the verb differs.
+/// setup script notices. Claude Code settings and the OpenCode plugin are
+/// independent writes; one failing must not hide the other, and a failure
+/// in either is a failed command.
 fn run_hooks_command(shim_path: Option<&str>, install: bool) {
     let resolved = shim_path
         .map(|p| Ok(std::path::PathBuf::from(p)))
@@ -258,23 +261,53 @@ fn run_hooks_command(shim_path: Option<&str>, install: bool) {
             std::process::exit(1);
         }
     };
-    let result = if install {
+    let claude = if install {
         activity::install::install(&settings, &shim)
     } else {
         activity::install::uninstall(&settings, &shim)
     };
-    match result {
-        Ok(()) if install => {
-            println!("Installed neige hooks into {}", settings.display());
-            println!("  shim: {}", shim.display());
-            println!();
-            println!("Claude sessions started from now on report their activity to neige.");
-        }
-        Ok(()) => println!("Removed neige hooks from {}", settings.display()),
+    let opencode_path = match activity::install::opencode_plugin_path() {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
+    };
+    let opencode = if install {
+        activity::install::install_opencode_plugin(&opencode_path)
+    } else {
+        activity::install::uninstall_opencode_plugin(&opencode_path)
+    };
+    let mut failed = false;
+    match claude {
+        Ok(()) if install => {
+            println!("Installed neige hooks into {}", settings.display());
+            println!("  shim: {}", shim.display());
+        }
+        Ok(()) => println!("Removed neige hooks from {}", settings.display()),
+        Err(e) => {
+            eprintln!("Claude Code hooks: {e}");
+            failed = true;
+        }
+    }
+    match opencode {
+        Ok(()) if install => {
+            println!("Installed OpenCode plugin at {}", opencode_path.display());
+        }
+        Ok(()) => println!("Removed OpenCode plugin from {}", opencode_path.display()),
+        Err(e) => {
+            eprintln!("OpenCode plugin: {e}");
+            failed = true;
+        }
+    }
+    if failed {
+        std::process::exit(1);
+    }
+    if install {
+        println!();
+        println!(
+            "Claude and OpenCode sessions started from now on report their activity to neige."
+        );
     }
 }
 

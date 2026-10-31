@@ -1,9 +1,9 @@
-//! Claude Code lifecycle hook ingest.
+//! Agent lifecycle hook ingest.
 //!
-//! The `neige-hook` shim runs as a hook command inside every Claude Code
-//! process that inherits `NEIGE_SESSION_ID` from its session's PTY, and POSTs
-//! the raw hook payload here. We read the event name out of the payload and
-//! project it onto the session's [`Activity`].
+//! The `neige-hook` shim (Claude Code / grok) and the OpenCode activity
+//! plugin both POST here. They inherit `NEIGE_SESSION_ID` from the session's
+//! PTY, and we read the event name out of the payload and project it onto
+//! the session's [`Activity`].
 //!
 //! The route sits under `/api/` so the auth middleware answers an
 //! unauthenticated POST with 401 rather than a redirect to the login page.
@@ -19,8 +19,8 @@ use uuid::Uuid;
 use super::AppState;
 use crate::activity::activity_for_hook;
 
-/// `POST /api/hooks/{session_id}` — body is Claude Code's hook payload,
-/// forwarded byte-for-byte by the shim.
+/// `POST /api/hooks/{session_id}` — body is a hook payload, forwarded
+/// byte-for-byte by the shim or posted by the OpenCode plugin.
 ///
 /// Always answers 204, including for events we don't model and for sessions
 /// we no longer know about. The shim is fire-and-forget by design (it must
@@ -85,5 +85,20 @@ mod tests {
         let payload: Value = serde_json::from_str(stop).unwrap();
         let event = hook_event_name(&payload).expect("grok names the key hookEventName");
         assert_eq!(activity_for_hook(event), Some(Activity::AwaitingInput));
+    }
+
+    /// What the OpenCode plugin POSTs after aggregating `session.status`.
+    /// Same pin as grok if this payload is dropped: Unknown → foreground
+    /// fallback → Working for the whole life of the TUI.
+    #[test]
+    fn a_real_opencode_plugin_payload_reaches_the_projection() {
+        let idle = json!({"hook_event_name": "session.idle"});
+        let event = hook_event_name(&idle).expect("plugin names the key hook_event_name");
+        assert_eq!(activity_for_hook(event), Some(Activity::AwaitingInput));
+        let busy = json!({"hook_event_name": "session.busy"});
+        assert_eq!(
+            activity_for_hook(hook_event_name(&busy).unwrap()),
+            Some(Activity::Working)
+        );
     }
 }
