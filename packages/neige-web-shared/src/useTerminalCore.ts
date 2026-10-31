@@ -305,14 +305,15 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     // async webfont metrics don't leave fullscreen TUIs (Grok) one cell
     // short at the edges.
     //
-    // After a seq=0 Snapshot we additionally:
-    //   1. Clear the alt-screen if the restore prefix re-entered one —
-    //      ring replay is often a mid-frame and paints garbage until the
-    //      TUI full-repaints.
-    //   2. Force a PTY winsize *change* (nudge then restore). Linux only
-    //      delivers SIGWINCH when TIOCSWINSZ actually changes size — a
-    //      same-size resize after browser refresh is a no-op, so Grok
-    //      never full-repaints.
+    // After a seq=0 Snapshot we:
+    //   1. Wipe the alt-screen (CSI H / CSI 2J). Grok's ring replay is
+    //      often a mid-frame; SIGWINCH then full-repaints a clean screen.
+    //   2. Close DEC 2026. OpenCode wraps every frame in synchronized
+    //      output; a truncated snapshot leaves xterm holding an empty
+    //      paint until CSI ?2026l.
+    //   3. Nudge PTY rows then restore, with a gap above OpenTUI's
+    //      ~100ms SIGWINCH debounce, so OpenCode actually sees a size
+    //      change instead of treating shrink→restore as a no-op.
     let disposed = false;
     let lastCols = 0;
     let lastRows = 0;
@@ -342,9 +343,10 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       if (disposed || cols < 2 || rows < 2) return false;
       if (nudgeTimer) clearTimeout(nudgeTimer);
       // Nudge rows by ±1 first (don't record — intermediate size is not
-      // the settled client size). Restore after a short delay so the kernel
-      // delivers two distinct TIOCSWINSZ / SIGWINCH events; a 0ms timeout
-      // can collapse them before the TUI wakes.
+      // the settled client size). Restore after a delay longer than
+      // OpenTUI's ~100ms SIGWINCH debounce so the intermediate size is
+      // observed; a 0ms timeout can collapse the two TIOCSWINSZ events
+      // before the TUI wakes, and ≤100ms looks like a net-zero burst.
       const nudgedRows = rows > 2 ? rows - 1 : rows + 1;
       sendResize(cols, nudgedRows, { record: false });
       nudgeTimer = setTimeout(() => {
@@ -358,7 +360,7 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         } catch {
           /* disposed mid-refresh */
         }
-      }, 50);
+      }, 150);
       return true;
     };
 
@@ -446,12 +448,31 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
     let writeBuf: { seq: bigint; bytes: Uint8Array; reset: boolean }[] = [];
     let rafId = 0;
 
+    // OpenCode / OpenTUI wrap every frame in DEC 2026 (synchronized output).
+    // xterm 6 holds the last paint until CSI ?2026l. A Snapshot is a ring
+    // slice, so it often ends after 2026h and before 2026l — after
+    // term.reset() that held paint is empty, i.e. a black screen. A network
+    // drop can latch the same way on a live Delta. Closing the latch is
+    // local to the emulator; it is not sent to the PTY.
+    const releaseSyncAndRefresh = (then?: () => void) => {
+      if (disposed) return;
+      term.write('\x1b[?2026l', () => {
+        if (disposed) return;
+        try {
+          term.clearTextureAtlas?.();
+          if (term.rows > 0) term.refresh(0, term.rows - 1);
+        } catch {
+          /* disposed mid-refresh */
+        }
+        then?.();
+      });
+    };
+
     /** Snapshot restore prefix re-enters alt-screen when these DEC modes are set. */
     const payloadEnablesAltScreen = (bytes: Uint8Array): boolean => {
       const n = Math.min(bytes.byteLength, 256);
       let s = '';
       for (let i = 0; i < n; i++) s += String.fromCharCode(bytes[i]!);
-      // restore_sequence is `ESC [ ? m1 ; m2 ; … h` with alt modes first.
       return (
         /\x1b\[\?[\d;]*1049[\d;]*h/.test(s) ||
         /\x1b\[\?[\d;]*1047[\d;]*h/.test(s) ||
@@ -472,17 +493,19 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         if (disposed) return;
         if (!sawReset) return;
         // Remount + snapshot often lands before dockview has finished sizing
-        // the panel; wait until write() has parsed the ring so fit/resize
-        // does not reflow mid-parse. For fullscreen TUIs, wipe the (often
-        // mid-frame) ring paint first — SIGWINCH then makes the app repaint
-        // a clean screen. Shells without alt-screen keep the replay.
-        const afterClear = () => {
-          if (!disposed) scheduleFit({ immediate: true, forceRedraw: true });
+        // the panel. Wipe a mid-frame alt-screen ring so Grok's SIGWINCH
+        // full-repaint starts from a clean canvas, then close 2026 so
+        // xterm actually paints that (OpenCode holds the last frame until
+        // 2026l), then SIGWINCH.
+        const afterWipe = () => {
+          releaseSyncAndRefresh(() => {
+            scheduleFit({ immediate: true, forceRedraw: true });
+          });
         };
         if (altScreenSnapshot) {
-          term.write('\x1b[H\x1b[2J', afterClear);
+          term.write('\x1b[H\x1b[2J', afterWipe);
         } else {
-          afterClear();
+          afterWipe();
         }
       };
 
@@ -577,6 +600,8 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
         );
         // Don't fit with a zero-size container (dockview mid-layout). The
         // settle path retries after paint; RO also fires when size arrives.
+        // Do not unlatch 2026 here — a Snapshot often follows this attach
+        // and term.reset() races with that write, painting an empty frame.
         scheduleFit({ immediate: true });
       };
 
@@ -640,7 +665,7 @@ export function useTerminalCore(opts: UseTerminalCoreOptions): UseTerminalCoreAp
       if (document.visibilityState !== 'visible') return;
       lastCols = 0;
       lastRows = 0;
-      scheduleFit({ immediate: true });
+      releaseSyncAndRefresh(() => scheduleFit({ immediate: true }));
     };
     document.addEventListener('visibilitychange', onVisibility);
 
