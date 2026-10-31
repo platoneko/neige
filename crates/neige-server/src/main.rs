@@ -139,6 +139,34 @@ mod tests {
     }
 
     #[test]
+    fn listen_defaults_to_loopback_and_accepts_repeats() {
+        let cli = Cli::try_parse_from(["neige-server"]).unwrap();
+        assert_eq!(cli.listen, vec!["127.0.0.1".to_string()]);
+
+        let cli = Cli::try_parse_from([
+            "neige-server",
+            "--listen",
+            "127.0.0.1",
+            "--listen",
+            "100.93.210.104",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.listen,
+            vec!["127.0.0.1".to_string(), "100.93.210.104".to_string()]
+        );
+    }
+
+    #[test]
+    fn loopback_only_requires_every_listen_address_local() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(is_loopback_only(&s(&["127.0.0.1"])));
+        assert!(is_loopback_only(&s(&["::1", "localhost"])));
+        assert!(!is_loopback_only(&s(&["127.0.0.1", "100.93.210.104"])));
+        assert!(!is_loopback_only(&s(&["0.0.0.0"])));
+    }
+
+    #[test]
     fn origins_from_status_json_empty_self() {
         let json = serde_json::json!({"Self": {}});
         assert!(origins_from_tailscale_status_json(&json, 3030).is_empty());
@@ -152,9 +180,10 @@ struct Cli {
     #[arg(long, default_value = "3030")]
     port: u16,
 
-    /// Listen address. Defaults to 127.0.0.1 to avoid LAN exposure.
+    /// Listen address; repeat to bind several (e.g. 127.0.0.1 plus a
+    /// tailnet IP). Defaults to 127.0.0.1 to avoid LAN exposure.
     #[arg(long, default_value = "127.0.0.1")]
-    listen: String,
+    listen: Vec<String>,
 
     /// Path to web/dist directory (auto-detected if not set)
     #[arg(long)]
@@ -389,6 +418,14 @@ fn rotate_token(path: &std::path::Path) -> std::io::Result<String> {
     Ok(token)
 }
 
+/// True when every listen address is reachable only from this machine —
+/// the precondition for running with `--no-auth`.
+fn is_loopback_only(listen: &[String]) -> bool {
+    listen
+        .iter()
+        .all(|a| matches!(a.as_str(), "127.0.0.1" | "::1" | "localhost"))
+}
+
 /// Build the list of Tailscale sockets to probe: always the default daemon
 /// (`None` → CLI uses its built-in socket), then extra paths from CLI flags
 /// and `NEIGE_TAILSCALE_SOCKETS`. Duplicates are dropped, order preserved.
@@ -562,11 +599,10 @@ async fn main() {
     }
 
     // Safety: disallow publicly binding with auth off.
-    if cli.no_auth && cli.listen != "127.0.0.1" && cli.listen != "::1" && cli.listen != "localhost"
-    {
+    if cli.no_auth && !is_loopback_only(&cli.listen) {
         eprintln!(
             "Refusing to start: --no-auth requires --listen 127.0.0.1 (got: {})",
-            cli.listen
+            cli.listen.join(", ")
         );
         std::process::exit(1);
     }
@@ -631,10 +667,10 @@ async fn main() {
             }
         };
         if let Some(tok) = fresh_token {
-            let bind = if cli.listen == "0.0.0.0" {
+            let bind = if cli.listen[0] == "0.0.0.0" {
                 format!("http://127.0.0.1:{}", cli.port)
             } else {
-                format!("http://{}:{}", cli.listen, cli.port)
+                format!("http://{}:{}", cli.listen[0], cli.port)
             };
             print_login_url(&bind, &tok);
         } else if cli_password.is_some() {
@@ -709,22 +745,29 @@ async fn main() {
         .layer(axum::middleware::from_fn(cache_control_layer))
         .with_state(state);
 
-    let addr = format!("{}:{}", cli.listen, cli.port);
-    println!("neige listening on http://{}", addr);
+    // Bind every address before serving any, so a bad --listen fails startup
+    // instead of leaving the server half-reachable.
+    let mut listeners = Vec::new();
+    for host in &cli.listen {
+        let addr = format!("{}:{}", host, cli.port);
+        listeners.push(tokio::net::TcpListener::bind(&addr).await.unwrap());
+        println!("neige listening on http://{}", addr);
+    }
     println!("project dir: {project_cwd}");
     println!("static dir: {}", static_dir.display());
     println!("mobile static dir: {}", mobile_static_dir.display());
-    if cli.listen == "0.0.0.0" {
+    if cli.listen.iter().any(|a| a == "0.0.0.0") {
         eprintln!(
             "WARNING: listening on 0.0.0.0 — anyone who can reach this port can attempt login."
         );
     }
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .unwrap();
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in listeners {
+        let service = app.clone().into_make_service_with_connect_info::<SocketAddr>();
+        servers.spawn(async move { axum::serve(listener, service).await });
+    }
+    while let Some(res) = servers.join_next().await {
+        res.unwrap().unwrap();
+    }
 }
