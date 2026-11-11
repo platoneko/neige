@@ -366,6 +366,29 @@ test("v2 installer rejects a missing registered package", () => {
   }
 });
 
+test("v2 installer rejects a stale backup even when that target entry is absent", () => {
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "native");
+  const backup = join(dir, "backup");
+  mkdirSync(target);
+  mkdirSync(backup);
+  const previous = 'export default { id: "neige-activity", setup() {} };\n';
+  writeFileSync(join(target, "index.js"), previous);
+  writeFileSync(join(backup, "tui.js"), "stale backup");
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, backup], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(target, "index.js"), "utf8"), previous);
+    assert.equal(existsSync(join(target, "tui.js")), false);
+    assert.equal(readFileSync(join(backup, "tui.js"), "utf8"), "stale backup");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("v2 installer restores a partial update when the server entry is read-only", (t) => {
   if (process.getuid?.() === 0) return t.skip("root bypasses file write permissions");
   const tmp = join(process.cwd(), "_local/tmp");

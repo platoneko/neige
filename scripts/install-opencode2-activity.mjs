@@ -19,14 +19,14 @@ if (!existsSync(join(target, "index.js"))) {
   throw new Error(`Expected an existing registered neige-activity package: ${target}`);
 }
 for (const [name] of entries) {
+  if (existsSync(join(backup, name))) {
+    throw new Error(`Backup already exists: ${join(backup, name)}`);
+  }
   const path = join(target, name);
   if (!existsSync(path)) continue;
   const previous = readFileSync(path, "utf8");
   if (!previous.includes('id: "neige-activity"')) {
     throw new Error(`Refusing to overwrite an unrelated plugin: ${path}`);
-  }
-  if (existsSync(join(backup, name))) {
-    throw new Error(`Backup already exists: ${join(backup, name)}`);
   }
 }
 mkdirSync(backup, { recursive: true });
