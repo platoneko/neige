@@ -127,10 +127,12 @@ async function withReporter(run) {
 
 async function reportV2(events, posts) {
   let drained;
+  let subscription;
   const done = new Promise((resolve) => { drained = resolve; });
   const ctx = {
     event: {
-      async *subscribe() {
+      async *subscribe(options) {
+        subscription = options;
         try {
           yield* events;
         } finally {
@@ -147,7 +149,7 @@ async function reportV2(events, posts) {
   } finally {
     await dispose();
   }
-  return posts;
+  return subscription;
 }
 
 test("the default v1 entry still reports busy and idle", { timeout: 5000 }, async () => {
@@ -183,6 +185,36 @@ test("v2 child completion preserves a working root", { timeout: 5000 }, async ()
       { type: "session.execution.succeeded", data: { sessionID: "root" } },
     ], posts);
     assert.deepEqual(posts, ["session.busy", "session.idle"]);
+  });
+});
+
+test("v2 subscribes only to activity events and forwards permission waits", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const subscription = await reportV2([
+      { type: "session.execution.started", data: { sessionID: "root" } },
+      { type: "permission.asked", data: { sessionID: "root", id: "permission" } },
+      { type: "session.execution.succeeded", data: { sessionID: "root" } },
+    ], posts);
+    assert.deepEqual(posts, ["session.busy", "permission.asked", "session.idle"]);
+    assert.deepEqual(subscription?.types, [
+      "session.created",
+      "session.execution.started",
+      "session.execution.succeeded",
+      "session.execution.failed",
+      "session.execution.interrupted",
+      "permission.asked",
+    ]);
+  });
+});
+
+test("v2 setup tolerates a non-Error subscription failure", { timeout: 5000 }, async (t) => {
+  t.mock.method(console, "error", () => {});
+  await withReporter(async (posts) => {
+    const dispose = await pluginModule.default.setup({
+      event: { subscribe() { throw null; } },
+    });
+    await dispose();
+    assert.deepEqual(posts, []);
   });
 });
 

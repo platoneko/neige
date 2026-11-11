@@ -9,6 +9,17 @@
 //   * Stay silent outside neige. No NEIGE_SESSION_ID ⇒ return empty hooks.
 
 const POST_TIMEOUT_MS = 3000;
+const OPENCODE2_EXECUTION_STATUS = new Map([
+  ["session.execution.started", "busy"],
+  ["session.execution.succeeded", "idle"],
+  ["session.execution.failed", "idle"],
+  ["session.execution.interrupted", "idle"],
+]);
+
+function reportError(err) {
+  const message = err && err.message ? err.message : err;
+  console.error("neige-activity:", message);
+}
 
 function statusType(event) {
   return event?.properties?.status?.type ?? null;
@@ -104,8 +115,7 @@ export const NeigeActivityPlugin = async (_ctx) => {
         await post(name);
         last = name;
       } catch (err) {
-        const message = err && err.message ? err.message : err;
-        console.error("neige-activity:", message);
+        reportError(err);
       }
     },
   };
@@ -119,40 +129,36 @@ async function setupOpenCode2(ctx) {
   if (typeof ctx?.event?.subscribe !== "function") return noop;
   try {
     const hooks = await NeigeActivityPlugin();
-    const iterator = ctx.event.subscribe()[Symbol.asyncIterator]();
+    const iterator = ctx.event.subscribe({
+      types: ["session.created", ...OPENCODE2_EXECUTION_STATUS.keys(), "permission.asked"],
+    })[Symbol.asyncIterator]();
     let stopped = false;
     const consuming = (async () => {
       while (!stopped) {
         const next = await iterator.next();
         if (stopped || next.done) break;
         let { type, data: properties } = next.value;
+        const status = OPENCODE2_EXECUTION_STATUS.get(type);
         if (type === "session.created") {
           properties = { info: { ...properties, id: properties?.sessionID } };
-        } else if (type === "session.execution.started") {
+        } else if (status) {
           type = "session.status";
-          properties = { ...properties, status: { type: "busy" } };
-        } else if (
-          type === "session.execution.succeeded" ||
-          type === "session.execution.failed" ||
-          type === "session.execution.interrupted"
-        ) {
-          type = "session.status";
-          properties = { ...properties, status: { type: "idle" } };
+          properties = { ...properties, status: { type: status } };
         }
         await hooks.event({ event: { type, properties } });
       }
-    })().catch((err) => console.error("neige-activity:", err.message));
+    })().catch(reportError);
     return async () => {
       stopped = true;
       try {
         await iterator.return?.();
         await consuming;
       } catch (err) {
-        console.error("neige-activity:", err.message);
+        reportError(err);
       }
     };
   } catch (err) {
-    console.error("neige-activity:", err.message);
+    reportError(err);
     return noop;
   }
 }
