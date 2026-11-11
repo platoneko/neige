@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
@@ -346,6 +346,43 @@ test("v2 installer refuses an unrelated plugin before writing either entry", () 
     assert.notEqual(result.status, 0);
     assert.equal(readFileSync(join(target, "index.js"), "utf8"), previous);
     assert.throws(() => readFileSync(join(target, "tui.js")), { code: "ENOENT" });
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("v2 installer rejects a missing registered package", () => {
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "missing");
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, join(dir, "backup")], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(target), false);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("v2 installer restores a partial update when the server entry is read-only", (t) => {
+  if (process.getuid?.() === 0) return t.skip("root bypasses file write permissions");
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "native");
+  mkdirSync(target);
+  const previous = 'export default { id: "neige-activity", setup() {} };\n';
+  writeFileSync(join(target, "index.js"), previous);
+  chmodSync(join(target, "index.js"), 0o444);
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, join(dir, "backup")], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(target, "index.js"), "utf8"), previous);
+    assert.equal(existsSync(join(target, "tui.js")), false);
+    assert.equal(readFileSync(join(dir, "backup/index.js"), "utf8"), previous);
   } finally {
     rmSync(dir, { recursive: true });
   }

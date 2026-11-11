@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +15,9 @@ const entries = [
   ["tui.js", "opencode_tui.js"],
   ["index.js", "opencode_plugin.js"],
 ];
+if (!existsSync(join(target, "index.js"))) {
+  throw new Error(`Expected an existing registered neige-activity package: ${target}`);
+}
 for (const [name] of entries) {
   const path = join(target, name);
   if (!existsSync(path)) continue;
@@ -26,13 +29,35 @@ for (const [name] of entries) {
     throw new Error(`Backup already exists: ${join(backup, name)}`);
   }
 }
-mkdirSync(target, { recursive: true });
 mkdirSync(backup, { recursive: true });
 for (const [name] of entries) {
   const path = join(target, name);
   if (existsSync(path)) copyFileSync(path, join(backup, name));
 }
-for (const [name, source] of entries) {
-  copyFileSync(fileURLToPath(new URL(source, sources)), join(target, name));
+const attempted = [];
+try {
+  for (const [name, source] of entries) {
+    attempted.push(name);
+    copyFileSync(fileURLToPath(new URL(source, sources)), join(target, name));
+  }
+} catch (error) {
+  const errors = [error];
+  for (const name of attempted.reverse()) {
+    const path = join(target, name);
+    const saved = join(backup, name);
+    try {
+      if (existsSync(saved)) {
+        // A failed write can leave the old file intact and read-only.
+        if (!existsSync(path) || !readFileSync(path).equals(readFileSync(saved))) {
+          copyFileSync(saved, path);
+        }
+      } else if (existsSync(path)) {
+        unlinkSync(path);
+      }
+    } catch (rollbackError) {
+      errors.push(rollbackError);
+    }
+  }
+  throw new AggregateError(errors, `Installation failed; originals are saved at ${backup}`);
 }
 console.log(`Installed OpenCode 2 activity client at ${target}; previous entries saved to ${backup}`);
