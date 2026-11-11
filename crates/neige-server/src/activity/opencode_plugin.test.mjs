@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { spawnSync } from "node:child_process";
 
 const pluginSource = readFileSync(
   new URL("./opencode_plugin.js", import.meta.url),
@@ -14,6 +15,45 @@ const pluginSource = readFileSync(
 const pluginModule = await import(
   `data:text/javascript;base64,${Buffer.from(pluginSource).toString("base64")}`
 );
+
+function loadTui() {
+  let effect;
+  const src = readFileSync(new URL("./opencode_tui.js", import.meta.url), "utf8")
+    .replace(/^import .*;$/gm, "")
+    .replace("export default", "this.plugin =");
+  const sandbox = {
+    NeigeActivityPlugin: pluginModule.NeigeActivityPlugin,
+    process,
+    console,
+    createRoot: (run) => run(() => { effect = undefined; }),
+    createEffect: (run) => { effect = run; run(); },
+  };
+  vm.runInNewContext(src, sandbox);
+  return { plugin: sandbox.plugin, refresh: () => effect?.() };
+}
+
+function tuiContext() {
+  const state = { selected: "root", status: {}, children: {}, permissions: {}, forms: {} };
+  return {
+    state,
+    ui: { router: { current: () => state.selected
+      ? { type: "session", sessionID: state.selected } : { type: "home" } } },
+    data: { session: {
+      root: (id) => id,
+      family: (id) => [id, ...(state.children[id] ?? [])],
+      status: (id) => state.status[id] ?? "idle",
+      permission: { list: (id) => state.permissions[id] ?? [] },
+      form: { list: (id) => state.forms[id] ?? [] },
+    } },
+  };
+}
+
+async function waitForPosts(posts, count) {
+  for (let i = 0; i < 100 && posts.length < count; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(posts.length, count);
+}
 
 function loadApplyEvent() {
   const path = join(dirname(fileURLToPath(import.meta.url)), "opencode_plugin.js");
@@ -125,33 +165,6 @@ async function withReporter(run) {
   }
 }
 
-async function reportV2(events, posts) {
-  let drained;
-  let subscription;
-  const done = new Promise((resolve) => { drained = resolve; });
-  const ctx = {
-    event: {
-      async *subscribe(options) {
-        subscription = options;
-        try {
-          yield* events;
-        } finally {
-          drained();
-        }
-      },
-    },
-  };
-  assert.equal(typeof pluginModule.default?.setup, "function");
-  const dispose = await pluginModule.default.setup(ctx);
-  assert.equal(typeof dispose, "function");
-  try {
-    await done;
-  } finally {
-    await dispose();
-  }
-  return subscription;
-}
-
 test("the default v1 entry still reports busy and idle", { timeout: 5000 }, async () => {
   await withReporter(async (posts) => {
     assert.equal(typeof pluginModule.default?.server, "function");
@@ -162,70 +175,134 @@ test("the default v1 entry still reports busy and idle", { timeout: 5000 }, asyn
   });
 });
 
-for (const ending of ["succeeded", "failed", "interrupted"]) {
-  test(`v2 execution start and ${ending} reach neige`, { timeout: 5000 }, async () => {
-    await withReporter(async (posts) => {
-      await reportV2([
-        { type: "session.created", data: { sessionID: "root" } },
-        { type: "session.execution.started", data: { sessionID: "root" } },
-        { type: `session.execution.${ending}`, data: { sessionID: "root" } },
-      ], posts);
-      assert.deepEqual(posts, ["session.created", "session.busy", "session.idle"]);
-    });
-  });
-}
-
-test("v2 child completion preserves a working root", { timeout: 5000 }, async () => {
+test("v2 shared server does not attribute its events to the terminal that started it", { timeout: 5000 }, async () => {
   await withReporter(async (posts) => {
-    await reportV2([
-      { type: "session.execution.started", data: { sessionID: "root" } },
-      { type: "session.created", data: { sessionID: "child", parentID: "root" } },
-      { type: "session.execution.started", data: { sessionID: "child" } },
-      { type: "session.execution.succeeded", data: { sessionID: "child" } },
-      { type: "session.execution.succeeded", data: { sessionID: "root" } },
-    ], posts);
-    assert.deepEqual(posts, ["session.busy", "session.idle"]);
-  });
-});
-
-test("v2 subscribes only to activity events and forwards permission waits", { timeout: 5000 }, async () => {
-  await withReporter(async (posts) => {
-    const subscription = await reportV2([
-      { type: "session.execution.started", data: { sessionID: "root" } },
-      { type: "permission.asked", data: { sessionID: "root", id: "permission" } },
-      { type: "session.execution.succeeded", data: { sessionID: "root" } },
-    ], posts);
-    assert.deepEqual(posts, ["session.busy", "permission.asked", "session.idle"]);
-    assert.deepEqual(subscription?.types, [
-      "session.created",
-      "session.execution.started",
-      "session.execution.succeeded",
-      "session.execution.failed",
-      "session.execution.interrupted",
-      "permission.asked",
-    ]);
-  });
-});
-
-test("v2 setup tolerates a non-Error subscription failure", { timeout: 5000 }, async (t) => {
-  t.mock.method(console, "error", () => {});
-  await withReporter(async (posts) => {
-    const dispose = await pluginModule.default.setup({
-      event: { subscribe() { throw null; } },
-    });
-    await dispose();
+    let subscribed = false;
+    const dispose = await pluginModule.default.setup({ event: { async *subscribe() {
+      subscribed = true;
+      yield { type: "session.execution.started", data: { sessionID: "other-pane" } };
+    } } });
+    await dispose?.();
+    assert.equal(subscribed, false);
     assert.deepEqual(posts, []);
   });
 });
 
-test("v2 setup is inert outside neige", async () => {
+test("v2 TUI publishes an already idle selected session without a new execution event", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const { plugin } = loadTui();
+    const dispose = await plugin.setup(tuiContext());
+    await waitForPosts(posts, 1);
+    await dispose();
+    assert.deepEqual(posts, ["session.idle"]);
+  });
+});
+
+test("v2 TUI tracks the selected session instead of another terminal's work", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const ctx = tuiContext();
+    ctx.state.status.other = "running";
+    const { plugin, refresh } = loadTui();
+    const dispose = await plugin.setup(ctx);
+    await waitForPosts(posts, 1);
+    ctx.state.status.root = "running";
+    refresh();
+    await waitForPosts(posts, 2);
+    ctx.state.status.root = "idle";
+    refresh();
+    await waitForPosts(posts, 3);
+    await dispose();
+    assert.deepEqual(posts, ["session.idle", "session.busy", "session.idle"]);
+  });
+});
+
+test("v2 TUI aggregates children and drops the previous session on navigation", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const ctx = tuiContext();
+    ctx.state.children.root = ["child"];
+    ctx.state.status.child = "running";
+    const { plugin, refresh } = loadTui();
+    const dispose = await plugin.setup(ctx);
+    await waitForPosts(posts, 1);
+    ctx.state.selected = "other";
+    refresh();
+    await waitForPosts(posts, 2);
+    await dispose();
+    assert.deepEqual(posts, ["session.busy", "session.idle"]);
+  });
+});
+
+test("v2 TUI clears busy when navigating home", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const ctx = tuiContext();
+    ctx.state.status.root = "running";
+    const { plugin, refresh } = loadTui();
+    const dispose = await plugin.setup(ctx);
+    await waitForPosts(posts, 1);
+    ctx.state.selected = null;
+    refresh();
+    await waitForPosts(posts, 2);
+    await dispose();
+    assert.deepEqual(posts, ["session.busy", "session.idle"]);
+  });
+});
+
+test("v2 TUI reports permission and form waits then resumes busy", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const ctx = tuiContext();
+    ctx.state.status.root = "running";
+    ctx.state.permissions.root = [{ id: "permission" }];
+    const { plugin, refresh } = loadTui();
+    const dispose = await plugin.setup(ctx);
+    await waitForPosts(posts, 1);
+    ctx.state.permissions.root = [];
+    refresh();
+    await waitForPosts(posts, 2);
+    ctx.state.forms.root = [{ id: "form" }];
+    refresh();
+    await waitForPosts(posts, 3);
+    await dispose();
+    assert.deepEqual(posts, ["permission.asked", "session.busy", "permission.asked"]);
+  });
+});
+
+test("v2 TUI serializes rapid snapshots and leaves the final idle state", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const ctx = tuiContext();
+    ctx.state.status.root = "running";
+    const { plugin, refresh } = loadTui();
+    const dispose = await plugin.setup(ctx);
+    ctx.state.status.root = "idle";
+    refresh();
+    ctx.state.status.root = "running";
+    refresh();
+    ctx.state.status.root = "idle";
+    refresh();
+    await waitForPosts(posts, 2);
+    await dispose();
+    assert.deepEqual(posts, ["session.busy", "session.idle"]);
+  });
+});
+
+test("v2 TUI cleanup stops later snapshots", { timeout: 5000 }, async () => {
+  await withReporter(async (posts) => {
+    const ctx = tuiContext();
+    const { plugin, refresh } = loadTui();
+    const dispose = await plugin.setup(ctx);
+    await waitForPosts(posts, 1);
+    await dispose();
+    ctx.state.status.root = "running";
+    refresh();
+    assert.deepEqual(posts, ["session.idle"]);
+  });
+});
+
+test("v2 TUI is inert outside neige", async () => {
   const previous = process.env.NEIGE_SESSION_ID;
   delete process.env.NEIGE_SESSION_ID;
   try {
-    assert.equal(typeof pluginModule.default?.setup, "function");
-    const dispose = await pluginModule.default.setup({
-      event: { subscribe() { assert.fail("must not subscribe outside neige"); } },
-    });
+    const { plugin } = loadTui();
+    const dispose = await plugin.setup({});
     await dispose();
   } finally {
     if (previous === undefined) delete process.env.NEIGE_SESSION_ID;
@@ -233,25 +310,103 @@ test("v2 setup is inert outside neige", async () => {
   }
 });
 
-test("v2 dispose closes a pending iterator and stops late events", { timeout: 5000 }, async () => {
-  await withReporter(async (posts) => {
-    let pending;
-    let closed = false;
-    const iterator = {
-      next() { return new Promise((resolve) => { pending = resolve; }); },
-      async return() {
-        closed = true;
-        pending({ done: false, value: {
-          type: "session.execution.started", data: { sessionID: "root" },
-        } });
-        return { done: true };
-      },
-      [Symbol.asyncIterator]() { return this; },
-    };
-    assert.equal(typeof pluginModule.default?.setup, "function");
-    const dispose = await pluginModule.default.setup({ event: { subscribe: () => iterator } });
-    await dispose();
-    assert.equal(closed, true);
-    assert.deepEqual(posts, []);
-  });
+test("v2 installer updates a registered adapter and preserves a backup", async () => {
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "native");
+  const backup = join(dir, "backup");
+  mkdirSync(target);
+  const previous = 'export default { id: "neige-activity", setup() {} };\n';
+  writeFileSync(join(target, "index.js"), previous);
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, backup], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(backup, "index.js"), "utf8"), previous);
+    assert.equal(readFileSync(join(target, "index.js"), "utf8"), pluginSource);
+    assert.equal(readFileSync(join(target, "tui.js"), "utf8"),
+      readFileSync(new URL("./opencode_tui.js", import.meta.url), "utf8"));
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("v2 installer refuses an unrelated plugin before writing either entry", () => {
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "native");
+  mkdirSync(target);
+  const previous = 'export default { id: "other-plugin" };\n';
+  writeFileSync(join(target, "index.js"), previous);
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, join(dir, "backup")], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(target, "index.js"), "utf8"), previous);
+    assert.throws(() => readFileSync(join(target, "tui.js")), { code: "ENOENT" });
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("v2 installer rejects a missing registered package", () => {
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "missing");
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, join(dir, "backup")], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(target), false);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("v2 installer rejects a stale backup even when that target entry is absent", () => {
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "native");
+  const backup = join(dir, "backup");
+  mkdirSync(target);
+  mkdirSync(backup);
+  const previous = 'export default { id: "neige-activity", setup() {} };\n';
+  writeFileSync(join(target, "index.js"), previous);
+  writeFileSync(join(backup, "tui.js"), "stale backup");
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, backup], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(target, "index.js"), "utf8"), previous);
+    assert.equal(existsSync(join(target, "tui.js")), false);
+    assert.equal(readFileSync(join(backup, "tui.js"), "utf8"), "stale backup");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("v2 installer restores a partial update when the server entry is read-only", (t) => {
+  if (process.getuid?.() === 0) return t.skip("root bypasses file write permissions");
+  const tmp = join(process.cwd(), "_local/tmp");
+  mkdirSync(tmp, { recursive: true });
+  const dir = mkdtempSync(join(tmp, "opencode-install-"));
+  const target = join(dir, "native");
+  mkdirSync(target);
+  const previous = 'export default { id: "neige-activity", setup() {} };\n';
+  writeFileSync(join(target, "index.js"), previous);
+  chmodSync(join(target, "index.js"), 0o444);
+  try {
+    const script = fileURLToPath(new URL("../../../../scripts/install-opencode2-activity.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, target, join(dir, "backup")], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(target, "index.js"), "utf8"), previous);
+    assert.equal(existsSync(join(target, "tui.js")), false);
+    assert.equal(readFileSync(join(dir, "backup/index.js"), "utf8"), previous);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });

@@ -9,12 +9,6 @@
 //   * Stay silent outside neige. No NEIGE_SESSION_ID ⇒ return empty hooks.
 
 const POST_TIMEOUT_MS = 3000;
-const OPENCODE2_EXECUTION_STATUS = new Map([
-  ["session.execution.started", "busy"],
-  ["session.execution.succeeded", "idle"],
-  ["session.execution.failed", "idle"],
-  ["session.execution.interrupted", "idle"],
-]);
 
 function reportError(err) {
   const message = err && err.message ? err.message : err;
@@ -121,50 +115,10 @@ export const NeigeActivityPlugin = async (_ctx) => {
   };
 };
 
-// OpenCode 2 loads default.setup and streams { type, data } execution
-// events instead of invoking the v1 event hook with session.status.
-async function setupOpenCode2(ctx) {
-  const noop = async () => {};
-  if (!process.env.NEIGE_SESSION_ID || !process.env.NEIGE_SERVER_URL) return noop;
-  if (typeof ctx?.event?.subscribe !== "function") return noop;
-  try {
-    const hooks = await NeigeActivityPlugin();
-    const iterator = ctx.event.subscribe({
-      types: ["session.created", ...OPENCODE2_EXECUTION_STATUS.keys(), "permission.asked"],
-    })[Symbol.asyncIterator]();
-    let stopped = false;
-    const consuming = (async () => {
-      while (!stopped) {
-        const next = await iterator.next();
-        if (stopped || next.done) break;
-        let { type, data: properties } = next.value;
-        const status = OPENCODE2_EXECUTION_STATUS.get(type);
-        if (type === "session.created") {
-          properties = { info: { ...properties, id: properties?.sessionID } };
-        } else if (status) {
-          type = "session.status";
-          properties = { ...properties, status: { type: status } };
-        }
-        await hooks.event({ event: { type, properties } });
-      }
-    })().catch(reportError);
-    return async () => {
-      stopped = true;
-      try {
-        await iterator.return?.();
-        await consuming;
-      } catch (err) {
-        reportError(err);
-      }
-    };
-  } catch (err) {
-    reportError(err);
-    return noop;
-  }
-}
-
 export default {
   id: "neige-activity",
   server: NeigeActivityPlugin,
-  setup: setupOpenCode2,
+  // The v2 server is shared by terminals and inherits only its launcher's
+  // NEIGE_SESSION_ID. Its TUI entry owns per-terminal reporting instead.
+  setup: () => {},
 };
