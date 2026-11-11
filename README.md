@@ -130,6 +130,16 @@ Dev server runs on `http://localhost:5173` with API and WebSocket traffic proxie
 
 Chat sessions use the Node sidecar at `runners/neige-chat-runner/dist/cli.js`. The server resolves it automatically from the workspace when running via `cargo run`; set `NEIGE_RUNNER_PATH=/path/to/cli.js` only if you want to point at a different build.
 
+### opencode2 活动状态
+
+opencode2 共用后台服务，因此每个终端的忙碌、空闲和等待输入状态由客户端插件上报。将已注册的本地 `neige-activity` 插件目录和备份目录传给安装脚本：
+
+```bash
+node scripts/install-opencode2-activity.mjs /path/to/neige-activity /path/to/backup
+```
+
+脚本会备份并更新 `index.js` 和 `tui.js`，保留 OpenCode 1 的上报实现。opencode2 的插件列表应同时显示 server 和 tui；仅更新 OpenCode 1 的 `plugins/neige-activity.js` 或刷新 neige 网页，不会更新客户端插件。
+
 ## Remote Access
 
 Use `neige-connect` to connect to a remote host. If neige isn't running there, it will automatically clone, build, and start it.
