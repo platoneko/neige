@@ -110,3 +110,55 @@ export const NeigeActivityPlugin = async (_ctx) => {
     },
   };
 };
+
+// OpenCode 2 loads default.setup and streams { type, data } execution
+// events instead of invoking the v1 event hook with session.status.
+async function setupOpenCode2(ctx) {
+  const noop = async () => {};
+  if (!process.env.NEIGE_SESSION_ID || !process.env.NEIGE_SERVER_URL) return noop;
+  if (typeof ctx?.event?.subscribe !== "function") return noop;
+  try {
+    const hooks = await NeigeActivityPlugin();
+    const iterator = ctx.event.subscribe()[Symbol.asyncIterator]();
+    let stopped = false;
+    const consuming = (async () => {
+      while (!stopped) {
+        const next = await iterator.next();
+        if (stopped || next.done) break;
+        let { type, data: properties } = next.value;
+        if (type === "session.created") {
+          properties = { info: { ...properties, id: properties?.sessionID } };
+        } else if (type === "session.execution.started") {
+          type = "session.status";
+          properties = { ...properties, status: { type: "busy" } };
+        } else if (
+          type === "session.execution.succeeded" ||
+          type === "session.execution.failed" ||
+          type === "session.execution.interrupted"
+        ) {
+          type = "session.status";
+          properties = { ...properties, status: { type: "idle" } };
+        }
+        await hooks.event({ event: { type, properties } });
+      }
+    })().catch((err) => console.error("neige-activity:", err.message));
+    return async () => {
+      stopped = true;
+      try {
+        await iterator.return?.();
+        await consuming;
+      } catch (err) {
+        console.error("neige-activity:", err.message);
+      }
+    };
+  } catch (err) {
+    console.error("neige-activity:", err.message);
+    return noop;
+  }
+}
+
+export default {
+  id: "neige-activity",
+  server: NeigeActivityPlugin,
+  setup: setupOpenCode2,
+};
